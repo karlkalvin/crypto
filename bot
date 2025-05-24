@@ -1227,9 +1227,9 @@ def test_websocket_connection():
         
         # Verificar se recebeu dados
         if "BTCUSDT" in mock_bot.state.last_prices:
-            logger.info(f"✅ SUCCESS: Received price data for BTCUSDT: {mock_bot.state.last_prices['BTCUSDT']}")
+            logger.info(f" SUCCESS: Received price data for BTCUSDT: {mock_bot.state.last_prices['BTCUSDT']}")
         else:
-            logger.warning("⚠️  No price data received yet")
+            logger.warning("  No price data received yet")
         
     except Exception as e:
         logger.error(f"❌ Test failed: {e}")
