@@ -111,6 +111,9 @@ TIMEFRAMES = {
 INITIAL_BANKROLL = 50.0  # Initial bankroll in USDT
 MAX_CONCURRENT_TRADES = 5  # Maximum simultaneous trades
 MAX_TRADES_PER_SYMBOL = 1  # Maximum trades per symbol
+MAX_POSITION_PERCENT_OF_INITIAL_BANKROLL = 0.20  # 20% da banca inicial máximo por trade
+MIN_NOTIONAL_MULTIPLIER = 1.20  # 120% do min_notional como valor mínimo de compra
+
 
 # Entry Parameters
 BUY_SCORE_THRESHOLD_DEFAULT = 6.0  # Initial selective threshold
@@ -1126,6 +1129,16 @@ class TradingBot:
         self.ai_advisor = AIAdvisor(OPENAI_API_KEY, GOOGLE_AI_API_KEY, self.state) if ENABLE_AI else None
         logger.info("TradingBot initialized with AIAdvisor" if self.ai_advisor else "TradingBot initialized without AIAdvisor")
 
+    def check_total_exposure(self) -> float:
+
+        total_exposure = sum(trade["cost"] for trade in self.state.trades.values())
+        exposure_percent = (total_exposure / INITIAL_BANKROLL) * 100
+        logger.info(f"Total exposure: {total_exposure:.2f} USDT ({exposure_percent:.1f}% of initial bankroll)")
+    # Alertar se exposição total exceder 80% da banca inicial
+        if exposure_percent > 80:
+            logger.warning(f"HIGH EXPOSURE WARNING: {exposure_percent:.1f}% of initial bankroll in active trades")
+            return exposure_percent
+
     def start(self) -> None:
         logger.info("Starting trading bot...")
         self.load_state()
@@ -1730,7 +1743,8 @@ class TradingBot:
     def trading_loop(self) -> None:
         """Main trading loop"""
         logger.info("Starting main trading loop")
-        
+
+        last_exposure_check = time.time()
         last_ml_train_check = time.time()
         last_balance_update = time.time()
         last_state_save = time.time()
@@ -1740,7 +1754,10 @@ class TradingBot:
             try:
                 # Reset daily PnL if necessary
                 self.state.reset_daily_pnl()
-                
+                # Verificar exposição total a cada 30 minutos
+                if time.time() - last_exposure_check > 30 * 60:
+                    self.check_total_exposure()
+                last_exposure_check = time.time()
                 # Update higher timeframe data
                 self.update_higher_timeframes()
                 
@@ -2604,7 +2621,9 @@ class TradingBot:
                 if self.state.available_balance <= 0:
                     logger.warning(f"No available balance for new trade on {symbol}")
                     return
-                
+            
+                        
+            
                 # Calculate position size
                 risk_amount = self.state.available_balance * MAX_RISK_PER_TRADE
             
@@ -2638,9 +2657,35 @@ class TradingBot:
                         logger.warning(f"Insufficient balance for min_notional on {symbol}")
                         return
             
+            # CORREÇÃO: Calcular tamanho máximo baseado na banca inicial
+                max_position_value = INITIAL_BANKROLL * MAX_POSITION_PERCENT_OF_INITIAL_BANKROLL
+            
+            # Valor mínimo baseado no min_notional
+                min_position_value = self.state.min_notional.get(symbol, 10.0) * MIN_NOTIONAL_MULTIPLIER
+            
+            # Usar o maior entre o mínimo necessário e o limite de 20%
+                target_position_value = max(min_position_value, max_position_value)
+            
+            # Verificar se temos saldo suficiente
+                available_for_trade = min(self.state.available_balance * 0.95, target_position_value)
+            
+                if available_for_trade < min_position_value:
+                    logger.warning(f"Insufficient balance for min position on {symbol}: need {min_position_value:.2f}, have {available_for_trade:.2f}")
+                    return
+            
+            # Calcular quantidade baseada no valor alvo
+                quantity = available_for_trade / current_price
+                cost = quantity * current_price
+            
+            # Calcular stop loss baseado no ATR (mantém a lógica de risco)
+                atr_value = df_1m['atr'].iloc[-1] if 'atr' in df_1m.columns and not pd.isna(df_1m['atr'].iloc[-1]) else current_price * 0.01
+                stop_loss = current_price - atr_value * STOP_LOSS_FACTOR
                 # Calculate take profit
                 take_profit = current_price + (current_price - stop_loss) * 2  # 2:1 reward-risk ratio
             
+                # Log da decisão
+                logger.info(f"Position sizing for {symbol}: Target={target_position_value:.2f} USDT ({MAX_POSITION_PERCENT_OF_INITIAL_BANKROLL*100:.0f}% of initial bankroll), "
+                    f"Actual={cost:.2f} USDT, Min_notional={self.state.min_notional.get(symbol, 10.0):.2f}")
                 # Execute buy order
                 self.enter_trade(symbol, current_price, quantity, stop_loss, take_profit)
         
@@ -2811,6 +2856,22 @@ class TradingBot:
         """Enters a new trade"""
         try:
             cost = price * quantity
+            # NOVA VALIDAÇÃO: Verificar se não excede 20% da banca inicial
+            max_allowed_cost = INITIAL_BANKROLL * MAX_POSITION_PERCENT_OF_INITIAL_BANKROLL
+            if cost > max_allowed_cost:
+            # Ajustar quantidade para respeitar o limite
+                quantity = max_allowed_cost / price
+                cost = quantity * price
+                logger.warning(f"Position size adjusted for {symbol} to respect 20% limit: {cost:.2f} USDT")
+        
+            if cost > self.state.available_balance:
+                logger.warning(f"Insufficient balance for trade on {symbol}: need {cost:.2f}, have {self.state.available_balance:.2f}")
+                return
+            # Verificar se ainda atende o min_notional após ajuste
+            min_required = self.state.min_notional.get(symbol, 10.0)
+            if cost < min_required:
+                logger.warning(f"Position too small after adjustment on {symbol}: {cost:.2f} < {min_required:.2f} (min_notional)")
+                return
             if cost > self.state.available_balance:
                 logger.warning(f"Insufficient balance for trade on {symbol}: need {cost:.2f}, have {self.state.available_balance:.2f}")
                 return
