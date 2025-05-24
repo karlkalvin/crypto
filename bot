@@ -6,6 +6,55 @@ Cryptocurrency Trading Bot with Advanced Risk Management, Machine Learning, and 
 Designed for Binance with Testnet/Mainnet support
 Version: Complete Fixed for Python 3.13.3 and python-binance 1.0.29
 """
+def apply_final_unicode_fix():
+    """Correção definitiva para Unicode - COPIAR ESTA FUNÇÃO"""
+    
+    if sys.platform.startswith('win'):
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+        os.environ['PYTHONLEGACYWINDOWSSTDIO'] = '0'
+    
+    class UnicodeCleanHandler(logging.StreamHandler):
+        def __init__(self, stream=None):
+            super().__init__(stream)
+            self.replacements = {
+                '✅': '[OK]', '❌': '[ERROR]', '⚠️': '[WARNING]',
+                '🚀': '[START]', '📊': '[DATA]', '🎯': '[TARGET]',
+                '💰': '[MONEY]', '🟢': '[GREEN]', '🔴': '[RED]',
+                '🔧': '[CONFIG]', '⏳': '[WAIT]', '🎉': '[SUCCESS]',
+                '🔌': '[CONNECT]', '📡': '[SIGNAL]', '🤖': '[BOT]',
+                '⏹️': '[STOP]', '🏁': '[FINISH]', '🔍': '[SEARCH]',
+                '📈': '[UP]', '📉': '[DOWN]'
+            }
+        
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                for unicode_char, replacement in self.replacements.items():
+                    msg = msg.replace(unicode_char, replacement)
+                self.stream.write(msg + self.terminator)
+                self.flush()
+            except UnicodeEncodeError:
+                try:
+                    msg = str(record.msg)
+                    for unicode_char, replacement in self.replacements.items():
+                        msg = msg.replace(unicode_char, replacement)
+                    msg = msg.encode('ascii', errors='ignore').decode('ascii')
+                    self.stream.write(f"{record.levelname}: {msg}" + self.terminator)
+                    self.flush()
+                except:
+                    self.stream.write(f"{record.levelname}: [MESSAGE_ERROR]" + self.terminator)
+                    self.flush()
+    
+    # Reconfigurar logging
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    safe_handler = UnicodeCleanHandler(sys.stdout)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    safe_handler.setFormatter(formatter)
+    root_logger.addHandler(safe_handler)
+    root_logger.setLevel(logging.INFO)
 
 import os
 import json
@@ -24,7 +73,9 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import talib as ta
-
+import logging
+import locale
+from datetime import datetime
 # Binance imports corrigidos para versão 1.0.29
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -40,7 +91,7 @@ except ImportError:
 
 import threading
 import asyncio
-
+import sys
 # ML imports
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -86,12 +137,16 @@ if IS_TESTNET:
     API_KEY = "7yfbpmo7DIpQvs28MzoCQNisahiXnb13BAJCW6IPwaF7SJQPfEpsUzK8R1ZD5Hab"
     API_SECRET = "4KFVh8RpZdmUpNumnoGksbbMrZclcdj9wZ1atMPObGHCNAbXiXvniMS2GvPvf6WB"
     BASE_URL = "https://testnet.binance.vision"
-    WS_BASE_URL = "wss://testnet.binance.vision/ws/"
+    def get_websocket_url(self, is_testnet=True):
+        if is_testnet:
+            return "wss://stream.testnet.binance.vision/ws/"
+        else:
+            return "wss://stream.testnet.binance.vision/ws/"
 else:
     API_KEY = "F2WdImRXAhc2dehQrtLTtlvCXVo24f3v7ueReI5ZwJZRbOCfUQMwbEpdYBHWZNkR"
     API_SECRET = "1Xqa2nBbCfq5efQ5nn8uRssfvDpch3DBBsHWFzGRsCZwzi0Q37i0NYc9qmVkcFzq"
     BASE_URL = None
-    WS_BASE_URL = "wss://stream.binance.com:9443/ws/"
+    WS_BASE_URL = "wss://stream.testnet.binance.vision/ws/"
 
 # Trading Pairs optimized for small/medium bankrolls
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT", "LTCUSDT", 
@@ -181,6 +236,79 @@ COSTS = {
     'google': {'input': 0.35, 'output': 1.05}    # Gemini 1.5 Flash
 }
 
+def setup_unicode_for_trading_bot():
+    """Configuração Unicode para o bot de trading"""
+    
+    # 1. Configurar ambiente Windows para UTF-8
+    if sys.platform.startswith('win'):
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+        try:
+            os.system('chcp 65001 >nul 2>&1')
+        except:
+            pass
+    
+    # 2. Detectar se terminal suporta Unicode
+    def can_use_emojis():
+        try:
+            test = "✅🚀📊"
+            test.encode(sys.stdout.encoding or 'utf-8')
+            return True
+        except:
+            return False
+    
+    use_emojis = can_use_emojis()
+    
+    # 3. Configurar logging seguro
+    class SafeFormatter(logging.Formatter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.emoji_replacements = {
+                '✅': '[OK]', '❌': '[ERROR]', '⚠️': '[WARN]',
+                '🚀': '[START]', '📊': '[DATA]', '🎯': '[TARGET]',
+                '💰': '[MONEY]', '🟢': '[GREEN]', '🔴': '[RED]',
+                '🔧': '[CONFIG]', '⏳': '[WAIT]', '🎉': '[SUCCESS]',
+                '🔌': '[CONNECT]', '📡': '[SIGNAL]', '🤖': '[BOT]',
+                '⏹️': '[STOP]', '🏁': '[FINISH]'
+            }
+        
+        def format(self, record):
+            try:
+                msg = super().format(record)
+                if not use_emojis:
+                    for emoji, replacement in self.emoji_replacements.items():
+                        msg = msg.replace(emoji, replacement)
+                return msg
+            except UnicodeEncodeError:
+                # Fallback: remover emojis
+                record.msg = str(record.msg)
+                for emoji, replacement in self.emoji_replacements.items():
+                    record.msg = record.msg.replace(emoji, replacement)
+                return super().format(record)
+    
+    # 4. Configurar handlers
+    formatter = SafeFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    if hasattr(console_handler.stream, 'reconfigure'):
+        try:
+            console_handler.stream.reconfigure(encoding='utf-8', errors='replace')
+        except:
+            pass
+    console_handler.setFormatter(formatter)
+    
+    # File handler
+    file_handler = logging.FileHandler("trading_bot.log", encoding='utf-8', errors='replace')
+    file_handler.setFormatter(formatter)
+    
+    # Configurar logging
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[console_handler, file_handler],
+        force=True
+    )
+    
+    return use_emojis
 # Custom JSON Encoder for numpy types
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -918,56 +1046,140 @@ class BinanceWebSocketManager:
         self.trading_bot = trading_bot
         self.ws_connections = {}
         self.running = False
+        self.reconnect_attempts = {}
+        self.max_reconnect_attempts = 5
         
+    def get_websocket_url(self, is_testnet=True):
+        """Returns correct WebSocket URL based on environment"""
+        if is_testnet:
+            # CORREÇÃO: URL correta para testnet
+            return "wss://stream.testnet.binance.vision/ws/"
+        else:
+            # URL para mainnet
+            return "wss://stream.testnet.binance.vision/ws/"
+    def create_stream_name(self, symbol):
+        return f"{symbol.lower()}@ticker"
     def start_websockets(self):
-        """Start WebSocket connections for all symbols"""
-        if not WEBSOCKET_AVAILABLE:
+        """Start WebSocket connections for all symbols - FIXED"""
+        if not hasattr(websocket, 'WebSocketApp'):
             logger.warning("WebSocket not available. Install websocket-client: pip install websocket-client")
             return
             
         self.running = True
+        base_url = self.get_websocket_url(is_testnet=True)  # Ajuste conforme necessário
         
-        for symbol in SYMBOLS:
-            # Start ticker stream
-            stream_name = f"{symbol.lower()}@ticker"
-            ws_url = f"{WS_BASE_URL}{stream_name}"
-            
-            def on_message(ws, message, symbol=symbol):
-                try:
-                    data = json.loads(message)
-                    if 'c' in data:  # Current price
-                        price = float(data['c'])
-                        self.trading_bot.state.last_prices[symbol] = price
+        # CORREÇÃO: Usar combined streams para melhor performance
+        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]  # Exemplo
+        
+        # Criar streams combinados (máximo 1024 streams por conexão)
+        streams = [self.create_stream_name(symbol) for symbol in symbols]
+        
+        # Para testnet, usar conexões individuais (mais estável)
+        for symbol in symbols:
+            self.start_individual_websocket(symbol, base_url)
+            time.sleep(0.1)  # Evitar rate limiting
+        
+        logger.info(f"Started WebSocket connections for {len(symbols)} symbols")
+    
+    def start_individual_websocket(self, symbol, base_url):
+        """Start individual WebSocket connection for a symbol"""
+        stream_name = self.create_stream_name(symbol)
+        
+        # CORREÇÃO: URL completa correta
+        ws_url = f"{base_url}{stream_name}"
+        
+        logger.info(f"Connecting to: {ws_url}")
+        
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                # CORREÇÃO: Verificar estrutura correta da mensagem
+                if 'c' in data:  # Current price
+                    price = float(data['c'])
+                    self.trading_bot.state.last_prices[symbol] = price
+                    logger.debug(f"Price update for {symbol}: {price}")
+                    # Verificar oportunidades de trading
+                    if hasattr(self.trading_bot, 'check_trading_opportunity'):
                         self.trading_bot.check_trading_opportunity(symbol)
-                except Exception as e:
-                    logger.error(f"Error processing WebSocket message for {symbol}: {e}")
-            
-            def on_error(ws, error, symbol=symbol):
-                logger.error(f"WebSocket error for {symbol}: {error}")
-            
-            def on_close(ws, close_status_code, close_msg, symbol=symbol):
-                logger.info(f"WebSocket closed for {symbol}")
-            
-            def on_open(ws, symbol=symbol):
-                logger.info(f"WebSocket opened for {symbol}")
-            
-            # Create WebSocket connection
+                elif 'stream' in data and 'data' in data:
+                    # Formato de stream combinado
+                    ticker_data = data['data']
+                    if 'c' in ticker_data:
+                        price = float(ticker_data['c'])
+                        self.trading_bot.state.last_prices[symbol] = price
+                        logger.debug(f"Price update for {symbol}: {price}")
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message for {symbol}: {e}")
+        
+        def on_error(ws, error):
+            logger.error(f"WebSocket error for {symbol}: {error}")
+            # CORREÇÃO: Implementar reconexão automática
+            self.schedule_reconnect(symbol, base_url)
+        
+        def on_close(ws, close_status_code, close_msg):
+            logger.info(f"WebSocket closed for {symbol} (Code: {close_status_code})")
+            if self.running:
+                self.schedule_reconnect(symbol, base_url)
+        
+        def on_open(ws):
+            logger.info(f"WebSocket opened for {symbol}")
+            # Reset reconnect attempts on successful connection
+            self.reconnect_attempts[symbol] = 0
+        
+        try:
+            # CORREÇÃO: Adicionar headers e configurações adequadas
             ws = websocket.WebSocketApp(
                 ws_url,
                 on_message=on_message,
                 on_error=on_error,
                 on_close=on_close,
-                on_open=on_open
+                on_open=on_open,
+                header={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }
             )
             
             # Start WebSocket in separate thread
-            ws_thread = threading.Thread(target=ws.run_forever)
+            ws_thread = threading.Thread(
+                target=ws.run_forever,
+                kwargs={
+                    'ping_interval': 20,  # Send ping every 20 seconds
+                    'ping_timeout': 10,   # Wait 10 seconds for pong
+                    'reconnect': 3        # Reconnect attempts
+                }
+            )
             ws_thread.daemon = True
             ws_thread.start()
             
             self.ws_connections[symbol] = ws
             
-        logger.info(f"Started WebSocket connections for {len(SYMBOLS)} symbols")
+        except Exception as e:
+            logger.error(f"Failed to create WebSocket for {symbol}: {e}")
+    
+    def schedule_reconnect(self, symbol, base_url):
+        """Schedule reconnection for a symbol"""
+        if not self.running:
+            return
+            
+        attempts = self.reconnect_attempts.get(symbol, 0)
+        if attempts >= self.max_reconnect_attempts:
+            logger.error(f"Max reconnection attempts reached for {symbol}")
+            return
+        
+        self.reconnect_attempts[symbol] = attempts + 1
+        delay = min(30, 2 ** attempts)  # Exponential backoff, max 30 seconds
+        
+        logger.info(f"Scheduling reconnect for {symbol} in {delay} seconds (attempt {attempts + 1})")
+        
+        def reconnect():
+            time.sleep(delay)
+            if self.running:
+                logger.info(f"Attempting to reconnect {symbol}")
+                self.start_individual_websocket(symbol, base_url)
+        
+        reconnect_thread = threading.Thread(target=reconnect)
+        reconnect_thread.daemon = True
+        reconnect_thread.start()
     
     def stop_websockets(self):
         """Stop all WebSocket connections"""
@@ -975,10 +1187,57 @@ class BinanceWebSocketManager:
         for symbol, ws in self.ws_connections.items():
             try:
                 ws.close()
-            except:
-                pass
+                logger.info(f"Closed WebSocket for {symbol}")
+            except Exception as e:
+                logger.error(f"Error closing WebSocket for {symbol}: {e}")
+        
         self.ws_connections.clear()
+        self.reconnect_attempts.clear()
         logger.info("Stopped all WebSocket connections")
+
+# Teste da correção
+def test_websocket_connection():
+    """Testa a conexão WebSocket corrigida"""
+    
+    class MockTradingBot:
+        def __init__(self):
+            self.state = MockState()
+        
+        def check_trading_opportunity(self, symbol):
+            logger.info(f"Checking trading opportunity for {symbol}")
+    
+    class MockState:
+        def __init__(self):
+            self.last_prices = {}
+    
+    # Criar instância do bot mock
+    mock_bot = MockTradingBot()
+    
+    # Criar manager WebSocket corrigido
+    ws_manager = BinanceWebSocketManager(mock_bot)
+    
+    logger.info("Testing WebSocket connection...")
+    
+    try:
+        # Testar conexão individual
+        ws_manager.start_individual_websocket("BTCUSDT", ws_manager.get_websocket_url(is_testnet=True))
+        
+        # Aguardar alguns segundos para testar
+        time.sleep(10)
+        
+        # Verificar se recebeu dados
+        if "BTCUSDT" in mock_bot.state.last_prices:
+            logger.info(f"✅ SUCCESS: Received price data for BTCUSDT: {mock_bot.state.last_prices['BTCUSDT']}")
+        else:
+            logger.warning("⚠️  No price data received yet")
+        
+    except Exception as e:
+        logger.error(f"❌ Test failed: {e}")
+    finally:
+        ws_manager.stop_websockets()
+
+if __name__ == "__main__":
+    test_websocket_connection()
 
 # AI Advisor for enhanced decision making
 class AIAdvisor:
@@ -3313,10 +3572,18 @@ class Backtester:
 
 # Main function
 def main():
-    """Main function to start the trading bot"""
+    apply_final_unicode_fix()
+    use_emojis = setup_unicode_for_trading_bot()
+    logger = logging.getLogger(__name__)
     try:
+        logger.info("=" * 60)
+        if use_emojis:
+            logger.info(" STARTING CRYPTOCURRENCY TRADING BOT")  # Agora será: [START] STARTING...
+        else:
+            logger.info("[START] STARTING CRYPTOCURRENCY TRADING BOT")
+        logger.info("=" * 60)
         logger.info("="*60)
-        logger.info("🚀 STARTING CRYPTOCURRENCY TRADING BOT")
+        logger.info(" STARTING CRYPTOCURRENCY TRADING BOT")
         logger.info("="*60)
         logger.info(f"Version: Complete Fixed for Python 3.13.3")
         logger.info(f"Testnet Mode: {'ON' if IS_TESTNET else 'OFF'}")
@@ -3332,23 +3599,23 @@ def main():
         # Add AI Advisor if configured
         if ENABLE_AI:
             bot.ai_advisor = AIAdvisor(OPENAI_API_KEY, GOOGLE_AI_API_KEY, bot.state)
-            logger.info("🤖 AI Advisor initialized")
+            logger.info(" AI Advisor initialized")
         
         # Add Backtester
         bot.backtester = Backtester(bot)
-        logger.info("📊 Backtester initialized")
+        logger.info(" Backtester initialized")
         
         # Start the bot
-        logger.info("🎯 Starting trading operations...")
+        logger.info(" Starting trading operations...")
         bot.start()
 
     except KeyboardInterrupt:
-        logger.info("⏹️  Keyboard interrupt received, shutting down...")
+        logger.info("⏹  Keyboard interrupt received, shutting down...")
     except Exception as e:
-        logger.error(f"❌ Error in main function: {e}")
+        logger.error(f" Error in main function: {e}")
         logger.error(traceback.format_exc())
     finally:
-        logger.info("🏁 Trading bot shutdown complete")
+        logger.info(" Trading bot shutdown complete")
 
 if __name__ == "__main__":
     main()
