@@ -1,0 +1,3293 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Cryptocurrency Trading Bot with Advanced Risk Management, Machine Learning, and Backtesting
+Designed for Binance with Testnet/Mainnet support
+Version: Complete Fixed for Python 3.13.3 and python-binance 1.0.29
+"""
+
+import os
+import json
+import math
+import time
+import datetime
+import logging
+import traceback
+import warnings
+import hashlib
+from typing import Dict, List, Optional, Tuple, Union, Any
+from threading import Thread, Lock
+from functools import lru_cache
+from collections import deque
+from datetime import datetime, timedelta
+import numpy as np
+import pandas as pd
+import talib as ta
+
+# Binance imports corrigidos para versão 1.0.29
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+from binance.enums import *
+
+# WebSocket corrigido - usando websocket-client
+try:
+    import websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+    print("websocket-client not installed. Install with: pip install websocket-client")
+
+import threading
+import asyncio
+
+# ML imports
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+import joblib
+import pickle
+
+# AI imports (optional)
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("OpenAI not installed. Install with: pip install openai")
+
+try:
+    import google.generativeai as genai
+    GOOGLE_AI_AVAILABLE = True
+except ImportError:
+    GOOGLE_AI_AVAILABLE = False
+    print("Google AI not installed. Install with: pip install google-generativeai")
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("trading_bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Constants and Configuration
+IS_TESTNET = True  # Set to True for testnet
+
+if IS_TESTNET:
+    API_KEY = "7yfbpmo7DIpQvs28MzoCQNisahiXnb13BAJCW6IPwaF7SJQPfEpsUzK8R1ZD5Hab"
+    API_SECRET = "4KFVh8RpZdmUpNumnoGksbbMrZclcdj9wZ1atMPObGHCNAbXiXvniMS2GvPvf6WB"
+    BASE_URL = "https://testnet.binance.vision"
+    WS_BASE_URL = "wss://testnet.binance.vision/ws/"
+else:
+    API_KEY = "F2WdImRXAhc2dehQrtLTtlvCXVo24f3v7ueReI5ZwJZRbOCfUQMwbEpdYBHWZNkR"
+    API_SECRET = "1Xqa2nBbCfq5efQ5nn8uRssfvDpch3DBBsHWFzGRsCZwzi0Q37i0NYc9qmVkcFzq"
+    BASE_URL = None
+    WS_BASE_URL = "wss://stream.binance.com:9443/ws/"
+
+# Trading Pairs optimized for small/medium bankrolls
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT", "LTCUSDT", 
+           "ADAUSDT", "DOTUSDT", "LINKUSDT", "ATOMUSDT", "XLMUSDT", "TRXUSDT", "UNIUSDT", 
+           "AVAXUSDT", "FILUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT"]
+
+# Timeframes for Multi-timeframe Analysis
+TIMEFRAMES = {
+    "1m": {"interval": KLINE_INTERVAL_1MINUTE, "limit": 100, "weight": 0.2, "update_freq": 1},
+    "5m": {"interval": KLINE_INTERVAL_5MINUTE, "limit": 100, "weight": 0.3, "update_freq": 5},
+    "15m": {"interval": KLINE_INTERVAL_15MINUTE, "limit": 100, "weight": 0.2, "update_freq": 15},
+    "1h": {"interval": KLINE_INTERVAL_1HOUR, "limit": 100, "weight": 0.3, "update_freq": 60},
+    "4h": {"interval": KLINE_INTERVAL_4HOUR, "limit": 100, "weight": 0.1, "update_freq": 240},
+}
+
+# Trading Parameters
+INITIAL_BANKROLL = 50.0  # Initial bankroll in USDT
+MAX_CONCURRENT_TRADES = 5  # Maximum simultaneous trades
+MAX_TRADES_PER_SYMBOL = 1  # Maximum trades per symbol
+
+# Entry Parameters
+BUY_SCORE_THRESHOLD_DEFAULT = 6.0  # Initial selective threshold
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
+VOLUME_THRESHOLD = 1.8
+
+# Profit Targets
+MIN_PROFIT_PERCENT = 3.0
+TARGET_PROFIT_PERCENT = 8.0
+AGGRESSIVE_PROFIT_PERCENT = 15.0
+
+# Risk Management
+STOP_LOSS_PERCENT = 2.0  # 2% stop loss
+STOP_LOSS_FACTOR = 2.0
+MAX_RISK_PER_TRADE = 0.15  # 15% of portfolio per trade
+DAILY_LOSS_LIMIT_PERCENT = 5.0  # Daily loss limit
+MAX_HOLD_TIME_HOURS = 48  # Maximum hold time for any trade
+
+# Trailing Stop Parameters
+TRAILING_ACTIVATION_PERCENT = 1.5
+TRAILING_DISTANCE_PERCENT = 0.6
+
+# Partial Take Profit Configuration
+TAKE_PROFIT_LEVELS = [
+    {"percent": MIN_PROFIT_PERCENT, "portion": 0.33},
+    {"percent": TARGET_PROFIT_PERCENT, "portion": 0.33},
+    {"portion": 0.34}  # Remainder
+]
+
+# Technical Indicators Parameters
+EMA_FAST = 12
+EMA_SLOW = 26
+MACD_SIGNAL = 9
+RSI_PERIOD = 14
+BOLLINGER_PERIOD = 20
+BOLLINGER_STD = 2.0
+STOCH_K = 14
+STOCH_D = 3
+STOCH_SLOWING = 3
+ATR_PERIOD = 14
+
+# Machine Learning Parameters
+ML_MODEL_PATH = "trade_predictor.pkl"
+ML_FEATURE_SCALER_PATH = "feature_scaler.pkl"
+ML_UPDATE_INTERVAL = 12 * 60 * 60  # Retrain every 12 hours
+ML_PROBABILITY_THRESHOLD = 0.65
+ML_MIN_TRAINING_SAMPLES = 100
+ML_CROSS_VALIDATION_FOLDS = 5
+
+# Backtesting Parameters
+HISTORICAL_DATA_FILE = "historical_data.pkl"
+HISTORICAL_TIMEFRAME = "1h"
+HISTORICAL_DAYS = 30
+PERFORMANCE_METRICS_FILE = "performance_metrics.json"
+
+# AI Configuration
+OPENAI_API_KEY = "your_openai_key_here"  # Replace with your OpenAI API key
+GOOGLE_AI_API_KEY = "your_google_ai_key_here"  # Replace with your Google AI Studio key
+ENABLE_AI = False  # Set to True if you have AI keys configured
+
+# Cost estimates (approximate values in USD per 1M tokens, based on 2025)
+COSTS = {
+    'openai': {'input': 5.00, 'output': 15.00},  # GPT-4o
+    'google': {'input': 0.35, 'output': 1.05}    # Gemini 1.5 Flash
+}
+
+# Custom JSON Encoder for numpy types
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        return super(NumpyEncoder, self).default(obj)
+
+# DataFrame utility class
+class DataFrameHandler:
+    """Utility class for handling common DataFrame issues"""
+    
+    @staticmethod
+    def ensure_unique_index(df: pd.DataFrame, method: str = 'first') -> pd.DataFrame:
+        """Ensures DataFrame has unique index"""
+        if df.empty:
+            return df
+            
+        if not hasattr(df, 'index') or not hasattr(df.index, 'is_unique'):
+            return df
+            
+        if df.index.is_unique:
+            return df
+            
+        logger.warning(f"Found {df.index.duplicated().sum()} duplicate indices. Method: {method}")
+        
+        if method == 'first':
+            return df[~df.index.duplicated(keep='first')]
+        elif method == 'last':
+            return df[~df.index.duplicated(keep='last')]
+        elif method == 'mean':
+            return df.groupby(df.index).mean()
+        elif method == 'microseconds':
+            if isinstance(df.index, pd.DatetimeIndex):
+                df_copy = df.copy()
+                mask = df.index.duplicated(keep=False)
+                
+                if mask.any():
+                    dups = df[mask].copy()
+                    for ts, group in dups.groupby(dups.index):
+                        offsets = range(1, len(group) + 1)
+                        for idx, offset in zip(group.index, offsets):
+                            loc_idx = df_copy.index.get_loc(idx)
+                            new_idx = df_copy.index[loc_idx] + pd.Timedelta(microseconds=offset)
+                            df_copy.index = df_copy.index.to_list()
+                            df_copy.index[loc_idx] = new_idx
+                            df_copy.index = pd.DatetimeIndex(df_copy.index)
+                
+                return df_copy
+            else:
+                return df[~df.index.duplicated(keep='first')]
+        else:
+            return df[~df.index.duplicated(keep='first')]
+    
+    @staticmethod
+    def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        """Cleans DataFrame by removing NaN and infinite values"""
+        if df.empty:
+            return df
+            
+        # Replace infinites with NaN
+        df = df.replace([np.inf, -np.inf], np.nan)
+        
+        # Fill NaN values with column mean
+        for col in df.columns:
+            if df[col].dtype.kind in 'ifc':  # integer, float or complex
+                mean_val = df[col].mean()
+                if not pd.isna(mean_val):
+                    df[col] = df[col].fillna(mean_val)
+                else:
+                    df[col] = df[col].fillna(0)
+        
+        return df
+    
+    @staticmethod
+    def safe_concat(dfs: list, **kwargs) -> pd.DataFrame:
+        """Safely concatenates DataFrames ensuring unique indices"""
+        if not dfs:
+            return pd.DataFrame()
+            
+        # Filter empty DataFrames
+        dfs = [df for df in dfs if not df.empty]
+        
+        if not dfs:
+            return pd.DataFrame()
+            
+        # Concatenate
+        result = pd.concat(dfs, **kwargs)
+        
+        # Ensure unique index
+        return DataFrameHandler.ensure_unique_index(result)
+
+# Model Manager for ML functionality
+class ModelManager:
+    """Dedicated class for managing machine learning models"""
+    
+    def __init__(self, model_path=ML_MODEL_PATH, scaler_path=ML_FEATURE_SCALER_PATH):
+        self.model_path = model_path
+        self.scaler_path = scaler_path
+        self.model = None
+        self.scaler = None
+        self.last_update = 0
+        self.performance_history = []
+        self.feature_importance = {}
+    
+    def load_model(self) -> bool:
+        """Loads model and scaler from disk if they exist"""
+        try:
+            if os.path.exists(self.model_path):
+                self.model = joblib.load(self.model_path)
+                logger.info(f"Loaded ML model from {self.model_path}")
+                
+                if os.path.exists(self.scaler_path):
+                    self.scaler = joblib.load(self.scaler_path)
+                    logger.info(f"Loaded feature scaler from {self.scaler_path}")
+                else:
+                    self.scaler = StandardScaler()
+                
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error loading ML model: {e}")
+            return False
+    
+    def save_model(self) -> bool:
+        """Saves model and scaler to disk"""
+        try:
+            if self.model is not None:
+                joblib.dump(self.model, self.model_path)
+                logger.info(f"Saved ML model to {self.model_path}")
+                
+                if self.scaler is not None:
+                    joblib.dump(self.scaler, self.scaler_path)
+                    logger.info(f"Saved feature scaler to {self.scaler_path}")
+                
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error saving ML model: {e}")
+            return False
+    
+    def train_model(self, ml_data: List[Dict[str, float]]) -> bool:
+        """Trains model with collected data"""
+        try:
+            if not ml_data or len(ml_data) < ML_MIN_TRAINING_SAMPLES:
+                logger.info(f"Insufficient data for ML training: {len(ml_data)} samples (minimum {ML_MIN_TRAINING_SAMPLES})")
+                return False
+            
+            # Prepare data
+            df = pd.DataFrame(ml_data)
+            X = df.drop(columns=['profit'])
+            y = df['profit'].apply(lambda x: 1 if x > 0 else 0)
+            
+            # Balance dataset if necessary
+            pos_samples = sum(y)
+            neg_samples = len(y) - pos_samples
+            
+            if pos_samples / len(y) < 0.3 or pos_samples / len(y) > 0.7:
+                logger.info(f"Balancing dataset: {pos_samples} positive, {neg_samples} negative samples")
+                
+                if pos_samples < neg_samples:
+                    # Undersample negative class
+                    neg_indices = np.where(y == 0)[0]
+                    remove_indices = np.random.choice(neg_indices, size=neg_samples - pos_samples, replace=False)
+                    keep_indices = np.array([i for i in range(len(y)) if i not in remove_indices])
+                    X = X.iloc[keep_indices]
+                    y = y.iloc[keep_indices]
+                else:
+                    # Undersample positive class
+                    pos_indices = np.where(y == 1)[0]
+                    remove_indices = np.random.choice(pos_indices, size=pos_samples - neg_samples, replace=False)
+                    keep_indices = np.array([i for i in range(len(y)) if i not in remove_indices])
+                    X = X.iloc[keep_indices]
+                    y = y.iloc[keep_indices]
+            
+            # Normalize features
+            if self.scaler is None:
+                self.scaler = StandardScaler()
+                X_scaled = self.scaler.fit_transform(X)
+            else:
+                X_scaled = self.scaler.transform(X)
+            
+            # Train-test split
+            X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+            
+            # Create and train model
+            model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
+            
+            # Cross validation
+            cv_scores = cross_val_score(model, X_train, y_train, cv=ML_CROSS_VALIDATION_FOLDS, scoring='f1')
+            logger.info(f"Cross-validation F1 scores: {cv_scores.mean():.2f} ± {cv_scores.std():.2f}")
+            
+            # Train on full training set
+            model.fit(X_train, y_train)
+            
+            # Evaluate on test set
+            y_pred = model.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, zero_division=0)
+            recall = recall_score(y_test, y_pred, zero_division=0)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            
+            # Record performance
+            performance = {
+                'date': datetime.now().isoformat(),
+                'samples': len(ml_data),
+                'accuracy': float(accuracy),
+                'precision': float(precision),
+                'recall': float(recall),
+                'f1_score': float(f1),
+                'cv_mean': float(cv_scores.mean()),
+                'cv_std': float(cv_scores.std())
+            }
+            self.performance_history.append(performance)
+            
+            # Feature importance
+            feature_importances = model.feature_importances_
+            self.feature_importance = dict(zip(X.columns, feature_importances))
+            
+            logger.info(f"ML Model trained. Metrics: Accuracy={accuracy:.2f}, Precision={precision:.2f}, Recall={recall:.2f}, F1={f1:.2f}")
+            logger.info(f"Top features: {sorted(self.feature_importance.items(), key=lambda x: x[1], reverse=True)[:5]}")
+            
+            # Save model
+            self.model = model
+            self.last_update = time.time()
+            self.save_model()
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error training ML model: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    def predict(self, features: Dict[str, float]) -> float:
+        """Makes prediction using trained model"""
+        try:
+            if self.model is None:
+                return 0.5  # Neutral value if no model
+            
+            # Convert to DataFrame
+            df = pd.DataFrame([features])
+            
+            # Ensure all required columns are present
+            missing_cols = set(self.model.feature_names_in_) - set(df.columns)
+            for col in missing_cols:
+                df[col] = 0  # Fill missing columns with 0
+            
+            # Reorder columns to match model
+            df = df[self.model.feature_names_in_]
+            
+            # Normalize
+            if self.scaler is not None:
+                X_scaled = self.scaler.transform(df)
+            else:
+                X_scaled = df.values
+            
+            # Prediction probability (returns probability of positive class)
+            prob = self.model.predict_proba(X_scaled)[0][1]
+            return prob
+        
+        except Exception as e:
+            logger.error(f"Error making prediction: {str(e)}")
+            return 0.5  # Neutral value on error
+
+# Trading State Management
+class TradingState:
+    """Manages trading state including active trades and history"""
+    
+    def __init__(self):
+        self.trades = {}  # Active trades
+        self.trade_history = []  # Trade history
+        self.account_balance = INITIAL_BANKROLL
+        self.available_balance = INITIAL_BANKROLL
+        self.daily_pnl = 0.0
+        self.daily_pnl_reset_time = None
+        self.market_data = {}  # Market data cache
+        self.historical_data = {}  # Historical data for backtesting
+        self.lock = Lock()  # For thread safety
+        self.websockets_started = False
+        self.correlation_matrix = pd.DataFrame()
+        self.last_prices = {}  # Last known prices
+        self.ml_data = []  # Data for ML training
+        self.model_manager = ModelManager()
+        self.last_backup_time = time.time()
+        self.min_notional = {symbol: 10.0 for symbol in SYMBOLS}  # Minimum order value per symbol
+        self.buy_score_threshold = BUY_SCORE_THRESHOLD_DEFAULT  # Dynamic threshold
+        self.market_sentiment = {}  # General market sentiment
+        self.data_quality = {}  # Data quality per symbol
+        self.trade_queue = deque(maxlen=10)  # Recent trades queue
+        self.performance_metrics = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_profit': 0.0,
+            'total_loss': 0.0,
+            'largest_profit': 0.0,
+            'largest_loss': 0.0,
+            'average_profit': 0.0,
+            'average_loss': 0.0,
+            'win_rate': 0.0,
+            'profit_factor': 0.0,
+            'average_hold_time_minutes': 0.0,
+            'daily_returns': [],
+            'monthly_returns': {},
+            'symbol_performance': {symbol: {"trades": 0, "win_rate": 0.0, "avg_profit": 0.0} for symbol in SYMBOLS}
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Converts state to dictionary for logging/saving"""
+        return {
+            "account_balance": self.account_balance,
+            "available_balance": self.available_balance,
+            "active_trades": len(self.trades),
+            "completed_trades": len(self.trade_history),
+            "daily_pnl": self.daily_pnl,
+            "daily_pnl_reset_time": str(self.daily_pnl_reset_time) if self.daily_pnl_reset_time else None,
+            "performance": self.performance_metrics,
+            "buy_score_threshold": self.buy_score_threshold
+        }
+    
+    def reset_daily_pnl(self) -> None:
+        """Resets daily PnL at the start of a new day"""
+        now = datetime.now()
+        if self.daily_pnl_reset_time is None or now.date() > self.daily_pnl_reset_time.date():
+            if self.daily_pnl_reset_time is not None:
+                daily_return = self.daily_pnl / self.account_balance * 100
+                self.performance_metrics["daily_returns"].append({
+                    "date": self.daily_pnl_reset_time.date().isoformat(),
+                    "return_pct": daily_return
+                })
+                
+                month_key = self.daily_pnl_reset_time.strftime("%Y-%m")
+                if month_key not in self.performance_metrics["monthly_returns"]:
+                    self.performance_metrics["monthly_returns"][month_key] = []
+                self.performance_metrics["monthly_returns"][month_key].append(daily_return)
+                
+            logger.info(f"Resetting daily PnL. Previous: {self.daily_pnl:.2f}")
+            self.daily_pnl = 0.0
+            self.daily_pnl_reset_time = now
+    
+    def update_balance(self, client: Client) -> None:
+        """Updates account balance from Binance"""
+        try:
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    account = client.get_account()
+                        
+                    if not isinstance(account, dict) or "balances" not in account:
+                        logger.error(f"Invalid account response: {account}")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+                        
+                    usdt_balance = float([asset for asset in account["balances"] if asset["asset"] == "USDT"][0]["free"])
+                    self.account_balance = usdt_balance
+                    
+                    # Calculate available balance
+                    allocated_balance = sum(trade["cost"] for trade in self.trades.values())
+                    self.available_balance = self.account_balance - allocated_balance
+                    
+                    logger.info(f"Balance updated: {self.account_balance:.2f} USDT (Available: {self.available_balance:.2f} USDT)")
+                    break
+                except Exception as e:
+                    retry_count += 1
+                    logger.warning(f"Retry {retry_count}/{max_retries} updating balance: {e}")
+                    time.sleep(2)
+        
+        except Exception as e:
+            logger.error(f"Error updating balance: {e}")
+    
+    def update_min_notional(self, client: Client) -> None:
+        """Updates minimum notional values from exchange info"""
+        try:
+            exchange_info = client.get_exchange_info()
+            
+            if not exchange_info or "symbols" not in exchange_info:
+                logger.error("Could not get exchange_info")
+                return
+
+            for symbol_info in exchange_info.get("symbols", []):
+                symbol = symbol_info.get("symbol")
+                if symbol not in SYMBOLS:
+                    continue
+                    
+                filters = symbol_info.get("filters", [])
+                notional_filter = next(
+                    (f for f in filters if f.get("filterType") in ["NOTIONAL", "MIN_NOTIONAL"]), None
+                )
+
+                if notional_filter:
+                    min_notional = notional_filter.get("minNotional", notional_filter.get("min", 10.0))
+                    self.min_notional[symbol] = float(min_notional)
+                    logger.info(f"Min notional for {symbol}: {self.min_notional[symbol]} USDT")
+                else:
+                    logger.warning(f"NOTIONAL filter not found for {symbol}")
+                    
+        except Exception as e:
+            logger.error(f"Error updating min notional: {e}")
+    
+    def update_correlation_matrix(self) -> None:
+        """Updates correlation matrix between trading pairs"""
+        try:
+            price_data = {}
+            
+            # Extract closing prices for each symbol
+            for symbol in SYMBOLS:
+                if symbol in self.market_data and '1h' in self.market_data[symbol]:
+                    df = self.market_data[symbol]['1h']
+                    # Ensure unique index
+                    df = DataFrameHandler.ensure_unique_index(df)
+                    if not df.empty and 'close' in df.columns:
+                        price_data[symbol] = df['close'].values
+            
+            if len(price_data) >= 2:  # Need at least 2 symbols for correlation
+                # Create DataFrame for correlation calculation
+                price_df = pd.DataFrame(price_data)
+                
+                # Calculate correlation matrix
+                self.correlation_matrix = price_df.corr()
+                
+                logger.debug(f"Updated correlation matrix with {len(price_data)} symbols")
+            else:
+                logger.warning("Not enough data to calculate correlation matrix")
+        
+        except Exception as e:
+            logger.error(f"Error updating correlation matrix: {e}")
+    
+    def update_market_sentiment(self) -> None:
+        """Analyzes general market sentiment based on indicators from all symbols"""
+        try:
+            bullish_count = 0
+            bearish_count = 0
+            total_symbols = 0
+            
+            for symbol in SYMBOLS:
+                if symbol not in self.market_data or '1h' not in self.market_data[symbol]:
+                    continue
+                    
+                df = self.market_data[symbol]['1h']
+                # Ensure unique index
+                df = DataFrameHandler.ensure_unique_index(df)
+                if df.empty:
+                    continue
+                    
+                total_symbols += 1
+                last_row = df.iloc[-1]
+                
+                # Check bullish/bearish signals
+                if 'rsi' in last_row:
+                    if last_row['rsi'] < 30:
+                        bullish_count += 1
+                    elif last_row['rsi'] > 70:
+                        bearish_count += 1
+                        
+                if 'macd' in last_row and 'macd_signal' in last_row:
+                    if last_row['macd'] > last_row['macd_signal']:
+                        bullish_count += 1
+                    else:
+                        bearish_count += 1
+                        
+                if 'ema_fast' in last_row and 'ema_slow' in last_row:
+                    if last_row['ema_fast'] > last_row['ema_slow']:
+                        bullish_count += 1
+                    else:
+                        bearish_count += 1
+            
+            if total_symbols > 0 and (bullish_count + bearish_count) > 0:
+                bullish_percentage = bullish_count / (bullish_count + bearish_count)
+                
+                if bullish_percentage > 0.7:
+                    sentiment = "strongly_bullish"
+                elif bullish_percentage > 0.55:
+                    sentiment = "bullish"
+                elif bullish_percentage < 0.3:
+                    sentiment = "strongly_bearish"
+                elif bullish_percentage < 0.45:
+                    sentiment = "bearish"
+                else:
+                    sentiment = "neutral"
+                    
+                self.market_sentiment = {
+                    "sentiment": sentiment,
+                    "bullish_percentage": bullish_percentage,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                logger.info(f"Market sentiment updated: {sentiment} ({bullish_percentage:.2%} bullish)")
+        except Exception as e:
+            logger.error(f"Error updating market sentiment: {e}")
+    
+    def assess_data_quality(self) -> None:
+        """Assesses market data quality for each symbol and timeframe"""
+        for symbol in SYMBOLS:
+            if symbol not in self.market_data:
+                self.data_quality[symbol] = {"score": 0, "status": "missing"}
+                continue
+                
+            quality_score = 0
+            timeframes_available = 0
+            
+            for tf in TIMEFRAMES:
+                if tf in self.market_data[symbol] and not self.market_data[symbol][tf].empty:
+                    df = self.market_data[symbol][tf]
+                    # Ensure unique index
+                    df = DataFrameHandler.ensure_unique_index(df)
+                    
+                    # Check required columns
+                    required_cols = ['open', 'high', 'low', 'close', 'volume']
+                    has_required = all(col in df.columns for col in required_cols)
+                    
+                    # Check technical indicators
+                    has_indicators = all(ind in df.columns for ind in ['rsi', 'macd', 'ema_fast', 'ema_slow'])
+                    
+                    # Check missing values
+                    missing_pct = df[required_cols].isnull().mean().mean() if has_required else 1.0
+                    
+                    # Calculate timeframe quality score (0-1)
+                    tf_score = (0.4 * has_required + 0.3 * has_indicators + 0.3 * (1 - missing_pct))
+                    
+                    # Weight by timeframe importance
+                    quality_score += tf_score * TIMEFRAMES[tf]["weight"]
+                    timeframes_available += TIMEFRAMES[tf]["weight"]
+            
+            # Normalize score
+            if timeframes_available > 0:
+                quality_score = quality_score / timeframes_available
+                
+                # Determine status
+                if quality_score > 0.8:
+                    status = "excellent"
+                elif quality_score > 0.6:
+                    status = "good"
+                elif quality_score > 0.4:
+                    status = "fair"
+                elif quality_score > 0.2:
+                    status = "poor"
+                else:
+                    status = "critical"
+            else:
+                quality_score = 0
+                status = "missing"
+                
+            self.data_quality[symbol] = {
+                "score": quality_score,
+                "status": status,
+                "last_updated": datetime.now().isoformat()
+            }
+            
+        logger.info(f"Data quality assessment completed for {len(self.data_quality)} symbols")
+    
+    def update_performance_metrics(self) -> None:
+        """Updates performance metrics based on trade history"""
+        try:
+            if not self.trade_history:
+                return
+            
+            # Convert to DataFrame for easier analysis
+            df = pd.DataFrame(self.trade_history)
+            # Ensure unique index if necessary
+            if 'entry_time' in df.columns:
+                df['entry_time_dt'] = pd.to_datetime(df['entry_time'])
+                if df['entry_time_dt'].duplicated().any():
+                    df = DataFrameHandler.ensure_unique_index(df.set_index('entry_time_dt')).reset_index()
+            
+            # Filter only complete trades (not partial)
+            if 'is_partial' in df.columns:
+                df = df[~df['is_partial']]
+            
+            # Count trades
+            total_trades = len(df)
+            winning_trades = len(df[df['profit_amount'] > 0])
+            losing_trades = len(df[df['profit_amount'] <= 0])
+            
+            # Calculate profits/losses
+            total_profit = df[df['profit_amount'] > 0]['profit_amount'].sum() if winning_trades > 0 else 0
+            total_loss = abs(df[df['profit_amount'] <= 0]['profit_amount'].sum()) if losing_trades > 0 else 0
+            
+            # Additional statistics
+            largest_profit = df['profit_amount'].max() if total_trades > 0 else 0
+            largest_loss = abs(df['profit_amount'].min()) if total_trades > 0 else 0
+            average_profit = total_profit / winning_trades if winning_trades > 0 else 0
+            average_loss = total_loss / losing_trades if losing_trades > 0 else 0
+            win_rate = winning_trades / total_trades if total_trades > 0 else 0
+            profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+            
+            # Calculate average hold time if we have timestamps
+            if 'entry_time' in df.columns and 'exit_time' in df.columns:
+                try:
+                    df['entry_datetime'] = pd.to_datetime(df['entry_time'])
+                    df['exit_datetime'] = pd.to_datetime(df['exit_time'])
+                    df['hold_time'] = (df['exit_datetime'] - df['entry_datetime']).dt.total_seconds() / 60
+                    average_hold_time = df['hold_time'].mean()
+                except:
+                    average_hold_time = 0
+            else:
+                average_hold_time = 0
+            
+            # Calculate daily returns
+            if 'exit_time' in df.columns and 'profit_amount' in df.columns:
+                try:
+                    df['exit_date'] = pd.to_datetime(df['exit_time']).dt.date
+                    daily_returns = df.groupby('exit_date')['profit_amount'].sum()
+                    
+                    # Convert to list format for JSON
+                    daily_returns_list = [
+                        {"date": date.isoformat(), "return": float(amount)}
+                        for date, amount in daily_returns.items()
+                    ]
+                    
+                    # Calculate monthly returns
+                    df['exit_month'] = pd.to_datetime(df['exit_time']).dt.strftime('%Y-%m')
+                    monthly_returns = df.groupby('exit_month')['profit_amount'].sum()
+                    
+                    monthly_returns_dict = {
+                        month: float(amount) for month, amount in monthly_returns.items()
+                    }
+                except Exception as e:
+                    logger.error(f"Error calculating returns: {e}")
+                    daily_returns_list = []
+                    monthly_returns_dict = {}
+            else:
+                daily_returns_list = []
+                monthly_returns_dict = {}
+            
+            # Calculate performance per symbol
+            symbol_performance = {}
+            for symbol in SYMBOLS:
+                symbol_trades = df[df['symbol'] == symbol] if 'symbol' in df.columns else pd.DataFrame()
+                if not symbol_trades.empty:
+                    symbol_total = len(symbol_trades)
+                    symbol_winning = len(symbol_trades[symbol_trades['profit_amount'] > 0])
+                    symbol_win_rate = symbol_winning / symbol_total if symbol_total > 0 else 0
+                    symbol_avg_profit = symbol_trades['profit_pct'].mean() if 'profit_pct' in symbol_trades.columns else 0
+                    
+                    symbol_performance[symbol] = {
+                        "trades": int(symbol_total),
+                        "win_rate": float(symbol_win_rate),
+                        "avg_profit": float(symbol_avg_profit)
+                    }
+                else:
+                    symbol_performance[symbol] = {
+                        "trades": 0,
+                        "win_rate": 0.0,
+                        "avg_profit": 0.0
+                    }
+            
+            # Update metrics
+            self.performance_metrics = {
+                'total_trades': int(total_trades),
+                'winning_trades': int(winning_trades),
+                'losing_trades': int(losing_trades),
+                'total_profit': float(total_profit),
+                'total_loss': float(total_loss),
+                'largest_profit': float(largest_profit),
+                'largest_loss': float(largest_loss),
+                'average_profit': float(average_profit),
+                'average_loss': float(average_loss),
+                'win_rate': float(win_rate),
+                'profit_factor': float(profit_factor),
+                'average_hold_time_minutes': float(average_hold_time),
+                'daily_returns': daily_returns_list,
+                'monthly_returns': monthly_returns_dict,
+                'symbol_performance': symbol_performance
+            }
+            
+            logger.info(f"Performance updated: {winning_trades}/{total_trades} winning trades ({win_rate:.1%}), "
+                      f"profit factor: {profit_factor:.2f}")
+            
+            # Save metrics to separate file
+            with open(PERFORMANCE_METRICS_FILE, "w") as f:
+                json.dump(self.performance_metrics, f, indent=2, cls=NumpyEncoder)
+        
+        except Exception as e:
+            logger.error(f"Error updating performance metrics: {e}")
+    
+    def backup_state(self) -> None:
+        """Backs up current state to timestamped file"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"trading_state_backup_{timestamp}.json"
+            
+            data = {
+                "trade_history": self.trade_history[-1000:],  # Last 1000 trades for space economy
+                "active_trades": self.trades,
+                "account_balance": self.account_balance,
+                "available_balance": self.available_balance,
+                "performance_metrics": self.performance_metrics,
+                "ml_data": self.ml_data[-2000:],  # Last 2000 ML examples
+                "buy_score_threshold": self.buy_score_threshold,
+                "last_updated": datetime.now().isoformat()
+            }
+            
+            with open(filename, "w") as f:
+                json.dump(data, f, indent=2, cls=NumpyEncoder)
+            
+            logger.info(f"Trading state backed up to {filename}")
+            self.last_backup_time = time.time()
+        
+        except Exception as e:
+            logger.error(f"Error backing up trading state: {e}")
+    
+    def load_historical_data(self) -> None:
+        """Loads historical data from disk"""
+        try:
+            if os.path.exists(HISTORICAL_DATA_FILE):
+                with open(HISTORICAL_DATA_FILE, "rb") as f:
+                    self.historical_data = pickle.load(f)
+                logger.info(f"Loaded historical data for {len(self.historical_data)} symbols")
+        except Exception as e:
+            logger.error(f"Failed to load historical data: {e}")
+    
+    def save_historical_data(self) -> None:
+        """Saves historical data to disk"""
+        try:
+            with open(HISTORICAL_DATA_FILE, "wb") as f:
+                pickle.dump(self.historical_data, f)
+            logger.info("Historical data saved to disk")
+        except Exception as e:
+            logger.error(f"Failed to save historical data: {e}")
+
+# WebSocket Manager for real-time data
+class BinanceWebSocketManager:
+    """Manages WebSocket connections for real-time market data"""
+    
+    def __init__(self, trading_bot):
+        self.trading_bot = trading_bot
+        self.ws_connections = {}
+        self.running = False
+        
+    def start_websockets(self):
+        """Start WebSocket connections for all symbols"""
+        if not WEBSOCKET_AVAILABLE:
+            logger.warning("WebSocket not available. Install websocket-client: pip install websocket-client")
+            return
+            
+        self.running = True
+        
+        for symbol in SYMBOLS:
+            # Start ticker stream
+            stream_name = f"{symbol.lower()}@ticker"
+            ws_url = f"{WS_BASE_URL}{stream_name}"
+            
+            def on_message(ws, message, symbol=symbol):
+                try:
+                    data = json.loads(message)
+                    if 'c' in data:  # Current price
+                        price = float(data['c'])
+                        self.trading_bot.state.last_prices[symbol] = price
+                        self.trading_bot.check_trading_opportunity(symbol)
+                except Exception as e:
+                    logger.error(f"Error processing WebSocket message for {symbol}: {e}")
+            
+            def on_error(ws, error, symbol=symbol):
+                logger.error(f"WebSocket error for {symbol}: {error}")
+            
+            def on_close(ws, close_status_code, close_msg, symbol=symbol):
+                logger.info(f"WebSocket closed for {symbol}")
+            
+            def on_open(ws, symbol=symbol):
+                logger.info(f"WebSocket opened for {symbol}")
+            
+            # Create WebSocket connection
+            ws = websocket.WebSocketApp(
+                ws_url,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+                on_open=on_open
+            )
+            
+            # Start WebSocket in separate thread
+            ws_thread = threading.Thread(target=ws.run_forever)
+            ws_thread.daemon = True
+            ws_thread.start()
+            
+            self.ws_connections[symbol] = ws
+            
+        logger.info(f"Started WebSocket connections for {len(SYMBOLS)} symbols")
+    
+    def stop_websockets(self):
+        """Stop all WebSocket connections"""
+        self.running = False
+        for symbol, ws in self.ws_connections.items():
+            try:
+                ws.close()
+            except:
+                pass
+        self.ws_connections.clear()
+        logger.info("Stopped all WebSocket connections")
+
+# AI Advisor for enhanced decision making
+class AIAdvisor:
+    """Class for integrating AI APIs (OpenAI and Google AI Studio) into trading bot"""
+    
+    def __init__(self, openai_key: str = None, google_key: str = None, trading_state: TradingState = None):
+        self.state = trading_state
+        self.openai_client = None
+        self.google_client = None
+        
+        # Configure OpenAI if key is provided
+        if openai_key and openai_key != "your_openai_key_here" and OPENAI_AVAILABLE:
+            try:
+                self.openai_client = openai.OpenAI(api_key=openai_key)
+                logger.info("OpenAI client initialized")
+            except Exception as e:
+                logger.error(f"Error initializing OpenAI: {e}")
+        
+        # Configure Google AI if key is provided
+        if google_key and google_key != "your_google_ai_key_here" and GOOGLE_AI_AVAILABLE:
+            try:
+                genai.configure(api_key=google_key)
+                self.google_client = genai.GenerativeModel('gemini-1.5-flash')
+                logger.info("Google AI client initialized")
+            except Exception as e:
+                logger.error(f"Error initializing Google AI: {e}")
+        
+        self.last_analysis_time = {}
+        self.error_patterns = []
+        self.active_provider = self.select_cheapest_provider()
+        
+        if not self.openai_client and not self.google_client:
+            logger.info("No AI providers configured - running without AI assistance")
+    
+    def select_cheapest_provider(self) -> Optional[str]:
+        """Selects cheapest AI provider based on availability"""
+        if self.openai_client and self.google_client:
+            return 'google'  # Gemini 1.5 Flash is significantly cheaper
+        elif self.openai_client:
+            return 'openai'
+        elif self.google_client:
+            return 'google'
+        return None
+    
+    def estimate_cost(self, provider: str, prompt: str) -> float:
+        """Estimates cost of query based on prompt size"""
+        # Approximate tokens (1 token ~ 4 characters)
+        input_tokens = len(prompt) / 4
+        # Assume average response of 500 tokens
+        output_tokens = 500
+        cost = (input_tokens / 1_000_000 * COSTS[provider]['input'] +
+                output_tokens / 1_000_000 * COSTS[provider]['output'])
+        return cost
+    
+    def analyze_market_context(self, symbol: str) -> Dict[str, Any]:
+        """Queries AI to analyze market context using cheapest provider"""
+        if not ENABLE_AI or not self.active_provider:
+            return {"sentiment": "neutral", "confidence": 0.5, "recommendation": "hold", "justification": "No AI provider available"}
+
+        try:
+            # Get recent symbol data
+            df_1h = self.state.market_data.get(symbol, {}).get('1h', pd.DataFrame())
+            if df_1h.empty:
+                return {"sentiment": "neutral", "confidence": 0.5, "recommendation": "hold", "justification": "No market data"}
+
+            last_price = float(df_1h['close'].iloc[-1])
+            rsi = float(df_1h['rsi'].iloc[-1]) if 'rsi' in df_1h.columns else 50
+            macd = float(df_1h['macd'].iloc[-1]) if 'macd' in df_1h.columns else 0
+
+            # Build prompt for analysis
+            prompt = f"""
+            You are a financial analyst specialized in cryptocurrencies. Analyze the following context for {symbol}:
+            - Last price: {last_price:.2f} USDT
+            - RSI (1h): {rsi:.2f}
+            - MACD (1h): {macd:.2f}
+            - Current market sentiment: {self.state.market_sentiment.get('sentiment', 'neutral')}
+            - Correlations: {self.state.correlation_matrix.get(symbol, pd.Series()).to_dict() if not self.state.correlation_matrix.empty else {}}
+
+            Provide:
+            1. Market sentiment (bullish, bearish, neutral, strongly_bullish, strongly_bearish).
+            2. A trading recommendation (buy, sell, hold).
+            3. A confidence level (0 to 1).
+            4. A brief justification.
+
+            Respond in JSON:
+            ```json
+            {{
+                "sentiment": "string",
+                "recommendation": "string",
+                "confidence": float,
+                "justification": "string"
+            }}
+```            """
+
+            if self.active_provider == 'openai' and self.openai_client:
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"}
+                )
+                result = json.loads(response.choices[0].message.content)
+            elif self.active_provider == 'google' and self.google_client:
+                response = self.google_client.generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                result = json.loads(response.text)
+            else:
+                return {"sentiment": "neutral", "confidence": 0.5, "recommendation": "hold", "justification": "No AI provider available"}
+
+            logger.info(f"{self.active_provider.capitalize()} market analysis for {symbol}: {result['recommendation']} (confidence: {result['confidence']:.2f}, cost: ${self.estimate_cost(self.active_provider, prompt):.6f})")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in {self.active_provider} market analysis for {symbol}: {e}")
+            return {"sentiment": "neutral", "confidence": 0.5, "recommendation": "hold", "justification": "Error in analysis"}
+
+# Main Trading Bot Class
+class TradingBot:
+    def __init__(self, api_key: str, api_secret: str, base_url: Optional[str] = None, state: Optional[TradingState] = None):
+        # Configure Binance client
+        if IS_TESTNET:
+            self.client = Client(api_key, api_secret, testnet=True)
+        else:
+            self.client = Client(api_key, api_secret)
+        
+        self.state = state if state else TradingState()
+        self.ws_manager = BinanceWebSocketManager(self)
+        self.indicator_cache = {}
+        self.last_check_time = {}
+        self.last_model_training = datetime.now() - timedelta(hours=24)
+        
+        for symbol in SYMBOLS:
+            self.last_check_time[symbol] = {}
+            for tf in TIMEFRAMES:
+                self.last_check_time[symbol][tf] = datetime.now() - timedelta(minutes=60)
+        
+        try:
+            self.client.ping()
+            logger.info("Successfully connected to Binance API")
+            self.state.model_manager.load_model()
+            self.state.update_min_notional(self.client)
+        except Exception as e:
+            logger.error(f"Failed to connect to Binance API: {e}")
+            raise
+        
+        # Initialize AI Advisor if configured
+        self.ai_advisor = AIAdvisor(OPENAI_API_KEY, GOOGLE_AI_API_KEY, self.state) if ENABLE_AI else None
+        logger.info("TradingBot initialized with AIAdvisor" if self.ai_advisor else "TradingBot initialized without AIAdvisor")
+
+    def start(self) -> None:
+        logger.info("Starting trading bot...")
+        self.load_state()
+        self.state.update_balance(self.client)
+        self.fetch_initial_data()
+        self.fetch_historical_data()
+        self.state.update_correlation_matrix()
+        self.state.assess_data_quality()
+        self.state.update_market_sentiment()
+        self.ws_manager.start_websockets()
+        self.state.websockets_started = True
+        
+        try:
+            self.trading_loop()
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received, shutting down...")
+        finally:
+            self.shutdown()
+
+    def shutdown(self) -> None:
+        logger.info("Shutting down trading bot...")
+        self.ws_manager.stop_websockets()
+        self.save_state()
+        self.state.save_historical_data()
+        self.state.model_manager.save_model()
+        logger.info("Trading bot shutdown complete")
+    
+    def load_state(self) -> None:
+        """Loads trading state from disk if available"""
+        try:
+            if os.path.exists("trading_state.json"):
+                with open("trading_state.json", "r") as f:
+                    data = json.load(f)
+                
+                self.state.trade_history = data.get("trade_history", [])
+                self.state.account_balance = data.get("account_balance", INITIAL_BANKROLL)
+                self.state.available_balance = data.get("available_balance", INITIAL_BANKROLL)
+                self.state.ml_data = data.get("ml_data", [])
+                self.state.buy_score_threshold = data.get("buy_score_threshold", BUY_SCORE_THRESHOLD_DEFAULT)
+                
+                # Load active trades if any
+                trades_data = data.get("active_trades", {})
+                for trade_id, trade_info in trades_data.items():
+                    self.state.trades[trade_id] = trade_info
+                
+                # Update performance metrics
+                self.state.update_performance_metrics()
+                
+                logger.info(f"Loaded trading state: {len(self.state.trades)} active trades, "
+                          f"BUY_SCORE_THRESHOLD: {self.state.buy_score_threshold}")
+        except Exception as e:
+            logger.error(f"Failed to load trading state: {e}")
+            logger.info("Starting with fresh state")
+        
+        # Load historical data
+        self.state.load_historical_data()
+        
+        # Load performance metrics from dedicated file
+        try:
+            if os.path.exists(PERFORMANCE_METRICS_FILE):
+                with open(PERFORMANCE_METRICS_FILE, "r") as f:
+                    self.state.performance_metrics = json.load(f)
+                logger.info("Loaded performance metrics from file")
+        except Exception as e:
+            logger.error(f"Failed to load performance metrics: {e}")
+    
+    def save_state(self) -> None:
+        """Saves trading state to disk"""
+        try:
+            # Update performance metrics before saving
+            self.state.update_performance_metrics()
+            
+            data = {
+                "trade_history": self.state.trade_history,
+                "active_trades": self.state.trades,
+                "account_balance": self.state.account_balance,
+                "available_balance": self.state.available_balance,
+                "buy_score_threshold": self.state.buy_score_threshold,
+                "ml_data": self.state.ml_data,
+                "last_updated": datetime.now().isoformat()
+            }
+            
+            with open("trading_state.json", "w") as f:
+                json.dump(data, f, indent=2, cls=NumpyEncoder)
+            
+            logger.info("Trading state saved to disk")
+            
+            # Periodic backup (every 6 hours)
+            if time.time() - self.state.last_backup_time > 6 * 60 * 60:
+                self.state.backup_state()
+        except Exception as e:
+            logger.error(f"Failed to save trading state: {e}")
+    
+    def fetch_initial_data(self) -> None:
+        logger.info("Fetching initial market data...")
+        
+        # Get available symbols on exchange
+        try:
+            exchange_info = self.client.get_exchange_info()
+            available_symbols = [s['symbol'] for s in exchange_info['symbols']]
+            logger.info(f"Found {len(available_symbols)} available symbols on exchange")
+        except Exception as e:
+            logger.error(f"Error fetching exchange info: {e}")
+            available_symbols = SYMBOLS  # Fallback to predefined list
+        
+        for symbol in SYMBOLS:
+            if symbol not in available_symbols:
+                logger.warning(f"{symbol} not available on exchange, skipping")
+                continue
+            
+            if symbol not in self.state.market_data:
+                self.state.market_data[symbol] = {}
+        
+            for tf, tf_info in TIMEFRAMES.items():
+                try:
+                    retries = 3
+                    for attempt in range(retries):
+                        try:
+                            # Increase limit to get more initial data
+                            increased_limit = min(1000, tf_info["limit"] * 3)  # Triple limit but don't exceed 1000
+                            klines = self.client.get_klines(
+                                symbol=symbol,
+                                interval=tf_info["interval"],
+                                limit=increased_limit
+                            )
+                        
+                            if not isinstance(klines, list) or len(klines) == 0:
+                                logger.error(f"Invalid klines response for {symbol} {tf}: {klines}")
+                                continue
+                            
+                            df = self.klines_to_dataframe(klines)
+                        
+                            # Store in cache
+                            self.state.market_data[symbol][tf] = df
+                        
+                            logger.info(f"Fetched {len(df)} {tf} candles for {symbol}")
+                        
+                            # Avoid API limits
+                            time.sleep(0.1)
+                            break
+                        except Exception as e:
+                            if attempt < retries - 1:
+                                logger.warning(f"Retry {attempt+1}/{retries} fetching {tf} data for {symbol}: {e}")
+                                time.sleep(2)
+                            else:
+                                raise
+            
+                except Exception as e:
+                    logger.error(f"Error fetching {tf} data for {symbol}: {e}")
+    
+        logger.info("Initial data fetch complete")
+    
+    def fetch_historical_data(self) -> None:
+        """Fetches historical data for backtesting"""
+        logger.info("Fetching historical data...")
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=HISTORICAL_DAYS)
+        
+        # Get available symbols
+        try:
+            exchange_info = self.client.get_exchange_info()
+            available_symbols = [s['symbol'] for s in exchange_info['symbols']]
+        except Exception as e:
+            logger.error(f"Error fetching exchange info: {e}")
+            available_symbols = SYMBOLS  # Fallback
+            
+        for symbol in SYMBOLS:
+            if symbol not in available_symbols:
+                logger.warning(f"{symbol} not available on exchange, skipping historical data")
+                continue
+                
+            # Skip if we already have recent data
+            if (symbol in self.state.historical_data and 
+                not self.state.historical_data[symbol].empty and 
+                self.state.historical_data[symbol].index[-1] > (end_time - timedelta(days=7))):
+                logger.info(f"Using existing historical data for {symbol}")
+                continue
+                
+            try:
+                # Use current data instead of fetching old historical data
+                if symbol in self.state.market_data and '1h' in self.state.market_data[symbol]:
+                    df = self.state.market_data[symbol]['1h'].copy()
+                    if not df.empty:
+                        self.state.historical_data[symbol] = df
+                        logger.info(f"Using current data as historical for {symbol} ({len(df)} candles)")
+                        continue
+                
+                # If no current data, try to fetch recent historical data
+                df = self.fetch_historical_data_for_symbol(symbol, HISTORICAL_TIMEFRAME, start_time, end_time)
+                if not df.empty:
+                    self.state.historical_data[symbol] = df
+                    logger.info(f"Fetched {len(df)} {HISTORICAL_TIMEFRAME} candles for {symbol} (historical)")
+                time.sleep(0.5)  # Avoid rate limits
+            except Exception as e:
+                logger.error(f"Error fetching historical data for {symbol}: {e}")
+                
+        self.state.save_historical_data()
+    
+    def fetch_historical_data_for_symbol(self, symbol: str, timeframe: str, start_time: datetime, end_time: datetime) -> pd.DataFrame:
+        """Fetches historical data for specific symbol"""
+        try:
+            start_str = int(start_time.timestamp() * 1000)
+            end_str = int(end_time.timestamp() * 1000)
+            
+            # Try to fetch recent data first (last 7 days)
+            recent_start = int((end_time - timedelta(days=7)).timestamp() * 1000)
+            
+            try:
+                klines = self.client.get_klines(
+                    symbol=symbol, 
+                    interval=timeframe, 
+                    startTime=recent_start, 
+                    endTime=end_str,
+                    limit=500
+                )
+                
+                if klines and len(klines) > 0:
+                    return self.klines_to_dataframe(klines)
+            except Exception as e:
+                logger.warning(f"Error fetching recent data for {symbol}, trying alternative approach: {e}")
+            
+            # If it fails, try to fetch just the last N candles without specifying dates
+            try:
+                klines = self.client.get_klines(
+                    symbol=symbol, 
+                    interval=timeframe, 
+                    limit=500
+                )
+                
+                if klines and len(klines) > 0:
+                    return self.klines_to_dataframe(klines)
+                else:
+                    logger.warning(f"No historical data available for {symbol}")
+                    return pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error fetching historical data for {symbol}: {e}")
+                return pd.DataFrame()
+                
+        except Exception as e:
+            logger.error(f"Error in fetch_historical_data_for_symbol for {symbol}: {e}")
+            return pd.DataFrame()
+    
+    def klines_to_dataframe(self, klines: List[List]) -> pd.DataFrame:
+        """Converts Binance klines data to pandas DataFrame with indicators"""
+        if not klines:
+            return pd.DataFrame()
+        
+        try:
+            # Create DataFrame from klines data
+            df = pd.DataFrame(klines, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            
+            # Convert types
+            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+            df[numeric_columns] = df[numeric_columns].astype(float)
+            
+            # Add timestamp as index
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # Check and fix duplicate indices before setting index
+            if df['timestamp'].duplicated().any():
+                logger.warning(f"Found {df['timestamp'].duplicated().sum()} duplicate timestamps. Adjusting...")
+                # Add microseconds to differentiate duplicate timestamps
+                mask = df['timestamp'].duplicated(keep=False)
+                dups = df[mask].copy()
+                
+                for ts, group in dups.groupby('timestamp'):
+                    offsets = range(1, len(group) + 1)
+                    for idx, offset in zip(group.index, offsets):
+                        df.loc[idx, 'timestamp'] += pd.Timedelta(microseconds=offset)
+            
+            # Now set index with unique timestamps
+            df.set_index('timestamp', inplace=True)
+            
+            # Ensure unique index using DataFrameHandler
+            df = DataFrameHandler.ensure_unique_index(df)
+            
+            # Calculate technical indicators
+            df = self.add_technical_indicators(df)
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error converting klines to dataframe: {e}")
+            return pd.DataFrame()
+    
+    def calculate_indicator_cache_key(self, df: pd.DataFrame, indicator_name: str) -> str:
+        """Calculates unique cache key for dataframe and indicator"""
+        # Use only last values for hash key
+        if len(df) > 30:
+            data_for_hash = df.iloc[-30:].to_json()
+        else:
+            data_for_hash = df.to_json()
+        
+        # Create hash of data
+        hash_obj = hashlib.md5(f"{data_for_hash}_{indicator_name}".encode())
+        return hash_obj.hexdigest()
+    
+    def get_cached_indicator(self, df: pd.DataFrame, indicator_name: str) -> Optional[Any]:
+        """Gets indicator from cache if available"""
+        cache_key = self.calculate_indicator_cache_key(df, indicator_name)
+        return self.indicator_cache.get(cache_key)
+    
+    def set_cached_indicator(self, df: pd.DataFrame, indicator_name: str, value: Any) -> None:
+        """Stores indicator in cache"""
+        cache_key = self.calculate_indicator_cache_key(df, indicator_name)
+        self.indicator_cache[cache_key] = value
+        
+        # Limit cache size (keep only last 1000 items)
+        if len(self.indicator_cache) > 1000:
+            # Remove first 100 items when exceeding limit
+            keys_to_remove = list(self.indicator_cache.keys())[:100]
+            for key in keys_to_remove:
+                del self.indicator_cache[key]
+    
+    def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Check if we have enough data
+        min_data_required = 30
+    
+        if len(df) < min_data_required:
+            logger.debug(f"Insufficient data for complete indicators: {len(df)} rows (minimum {min_data_required})")
+        
+            # For very small DataFrames, return without trying to calculate indicators
+            if len(df) < 5:
+                return df
+            
+            # For small but usable DataFrames, adjust indicator periods
+            adjusted_period = min(len(df) - 2, 14)  # Use smaller period but ensure at least 2 points
+            if adjusted_period < 2:
+                return df
+        else:
+            adjusted_period = None  # Use default periods
+    
+        try:
+            # Check and fix duplicate indices
+            if not df.index.is_unique:
+                logger.debug(f"Found {df.index.duplicated().sum()} duplicate timestamps. Adjusting...")
+                # Method 1: Keep only first occurrence
+                df = df[~df.index.duplicated(keep='first')]
+            
+                # If still problems, try more aggressive approach
+                if not df.index.is_unique:
+                    # Method 2: Reset index completely
+                    df = df.reset_index(drop=True)
+                    logger.debug("Index reset to ensure uniqueness")
+        
+            # Create copy of dataframe to avoid SettingWithCopyWarning
+            df = df.copy()
+        
+            # RSI
+            rsi_period = adjusted_period or RSI_PERIOD
+            if len(df) > rsi_period:
+                cache_key = self.calculate_indicator_cache_key(df, 'rsi')
+                cached_rsi = self.indicator_cache.get(cache_key)
+                if cached_rsi is not None:
+                    df['rsi'] = cached_rsi
+                else:
+                    df['rsi'] = ta.RSI(df['close'].values, timeperiod=rsi_period)
+                    self.set_cached_indicator(df, 'rsi', df['rsi'].values)
+        
+            # MACD - requires more data, check if we have enough
+            macd_min_period = (adjusted_period or EMA_SLOW) + MACD_SIGNAL
+            if len(df) > macd_min_period:
+                cache_key = self.calculate_indicator_cache_key(df, 'macd')
+                cached_macd = self.indicator_cache.get(cache_key)
+                if cached_macd is not None:
+                    df['macd'] = cached_macd[0]
+                    df['macd_signal'] = cached_macd[1]
+                    df['macd_hist'] = cached_macd[2]
+                else:
+                    fast_period = adjusted_period or EMA_FAST
+                    slow_period = adjusted_period or EMA_SLOW
+                    signal_period = adjusted_period or MACD_SIGNAL if adjusted_period else MACD_SIGNAL
+                
+                    macd, signal, hist = ta.MACD(
+                        df['close'].values,
+                        fastperiod=fast_period,
+                        slowperiod=slow_period,
+                        signalperiod=signal_period
+                    )
+                    df['macd'] = macd
+                    df['macd_signal'] = signal
+                    df['macd_hist'] = hist
+                    self.set_cached_indicator(df, 'macd', (macd, signal, hist))
+        
+            # Bollinger Bands
+            bb_period = adjusted_period or BOLLINGER_PERIOD
+            if len(df) > bb_period:
+                cache_key = self.calculate_indicator_cache_key(df, 'bbands')
+                cached_bbands = self.indicator_cache.get(cache_key)
+                if cached_bbands is not None:
+                    df['bb_upper'] = cached_bbands[0]
+                    df['bb_middle'] = cached_bbands[1]
+                    df['bb_lower'] = cached_bbands[2]
+                else:
+                    upper, middle, lower = ta.BBANDS(
+                        df['close'].values,
+                        timeperiod=bb_period,
+                        nbdevup=BOLLINGER_STD,
+                        nbdevdn=BOLLINGER_STD
+                    )
+                    df['bb_upper'] = upper
+                    df['bb_middle'] = middle
+                    df['bb_lower'] = lower
+                    self.set_cached_indicator(df, 'bbands', (upper, middle, lower))
+            
+                # Calculate BB width
+                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+            
+                # Percent B
+                df['percent_b'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+        
+            # EMA
+            ema_fast_period = adjusted_period or EMA_FAST
+            if len(df) > ema_fast_period:
+                cache_key = self.calculate_indicator_cache_key(df, 'ema_fast')
+                cached_ema_fast = self.indicator_cache.get(cache_key)
+                if cached_ema_fast is not None:
+                    df['ema_fast'] = cached_ema_fast
+                else:
+                    df['ema_fast'] = ta.EMA(df['close'].values, timeperiod=ema_fast_period)
+                    self.set_cached_indicator(df, 'ema_fast', df['ema_fast'].values)
+        
+            ema_slow_period = adjusted_period or EMA_SLOW
+            if len(df) > ema_slow_period:
+                cache_key = self.calculate_indicator_cache_key(df, 'ema_slow')
+                cached_ema_slow = self.indicator_cache.get(cache_key)
+                if cached_ema_slow is not None:
+                    df['ema_slow'] = cached_ema_slow
+                else:
+                    df['ema_slow'] = ta.EMA(df['close'].values, timeperiod=ema_slow_period)
+                    self.set_cached_indicator(df, 'ema_slow', df['ema_slow'].values)
+        
+            # Other indicators only if we have enough data
+            if len(df) >= min_data_required:
+                # Stochastic Oscillator
+                cache_key = self.calculate_indicator_cache_key(df, 'stoch')
+                cached_stoch = self.indicator_cache.get(cache_key)
+                if cached_stoch is not None:
+                    df['slowk'] = cached_stoch[0]
+                    df['slowd'] = cached_stoch[1]
+                else:
+                    slowk, slowd = ta.STOCH(
+                        df['high'].values,
+                        df['low'].values,
+                        df['close'].values,
+                        fastk_period=STOCH_K,
+                        slowk_period=STOCH_SLOWING,
+                        slowk_matype=0,
+                        slowd_period=STOCH_D,
+                        slowd_matype=0
+                    )
+                    df['slowk'] = slowk
+                    df['slowd'] = slowd
+                    self.set_cached_indicator(df, 'stoch', (slowk, slowd))
+            
+                # ATR for volatility
+                cache_key = self.calculate_indicator_cache_key(df, 'atr')
+                cached_atr = self.indicator_cache.get(cache_key)
+                if cached_atr is not None:
+                    df['atr'] = cached_atr
+                else:
+                    df['atr'] = ta.ATR(
+                        df['high'].values,
+                        df['low'].values,
+                        df['close'].values,
+                        timeperiod=ATR_PERIOD
+                    )
+                    self.set_cached_indicator(df, 'atr', df['atr'].values)
+            
+                # Relative volume
+                df['rel_volume'] = df['volume'] / df['volume'].rolling(window=min(20, len(df)-1)).mean()
+            
+                # Price percentage change
+                df['price_change_pct'] = df['close'].pct_change() * 100
+            
+                # Volatility
+                if 'atr' in df.columns:
+                    df['volatility'] = df['atr'] / df['close'] * 100
+                    volatility_sma = df['volatility'].rolling(window=min(10, len(df)-1)).mean()
+                    df['market_regime'] = np.where(
+                        df['volatility'] > volatility_sma * 1.2, 
+                        'high_volatility',
+                        np.where(
+                            df['volatility'] < volatility_sma * 0.8,
+                            'low_volatility',
+                            'normal_volatility'
+                        )
+                    )
+            
+                # ADX for trend strength
+                cache_key = self.calculate_indicator_cache_key(df, 'adx')
+                cached_adx = self.indicator_cache.get(cache_key)
+                if cached_adx is not None:
+                    df['adx'] = cached_adx
+                else:
+                    df['adx'] = ta.ADX(
+                        df['high'].values,
+                        df['low'].values,
+                        df['close'].values,
+                        timeperiod=14
+                    )
+                    self.set_cached_indicator(df, 'adx', df['adx'].values)
+            
+                # Additional indicators only if we have lots of data
+                if len(df) >= min_data_required + 10:
+                    # CCI for overbought/oversold conditions
+                    cache_key = self.calculate_indicator_cache_key(df, 'cci')
+                    cached_cci = self.indicator_cache.get(cache_key)
+                    if cached_cci is not None:
+                        df['cci'] = cached_cci
+                    else:
+                        df['cci'] = ta.CCI(
+                            df['high'].values,
+                            df['low'].values,
+                            df['close'].values,
+                            timeperiod=20
+                        )
+                        self.set_cached_indicator(df, 'cci', df['cci'].values)
+                
+                    # MFI (Money Flow Index) for volume and price
+                    cache_key = self.calculate_indicator_cache_key(df, 'mfi')
+                    cached_mfi = self.indicator_cache.get(cache_key)
+                    if cached_mfi is not None:
+                        df['mfi'] = cached_mfi
+                    else:
+                        df['mfi'] = ta.MFI(
+                            df['high'].values,
+                            df['low'].values,
+                            df['close'].values,
+                            df['volume'].values,
+                            timeperiod=14
+                        )
+                        self.set_cached_indicator(df, 'mfi', df['mfi'].values)
+                
+                    # OBV (On Balance Volume)
+                    cache_key = self.calculate_indicator_cache_key(df, 'obv')
+                    cached_obv = self.indicator_cache.get(cache_key)
+                    if cached_obv is not None:
+                        df['obv'] = cached_obv
+                    else:
+                        df['obv'] = ta.OBV(
+                            df['close'].values,
+                            df['volume'].values
+                        )
+                        self.set_cached_indicator(df, 'obv', df['obv'].values)
+        
+            # Candlestick patterns (can be calculated with less data)
+            if len(df) >= 2:
+                # Add candlestick patterns for reversal detection
+                df['engulfing'] = np.where(
+                    (df['close'].shift(1) < df['open'].shift(1)) &  # Previous candle bearish
+                    (df['close'] > df['open']) &  # Current candle bullish
+                    (df['close'] > df['open'].shift(1)) &  # Close above previous open
+                    (df['open'] < df['close'].shift(1)),  # Open below previous close
+                    1,  # Bullish engulfing
+                    np.where(
+                        (df['close'].shift(1) > df['open'].shift(1)) &  # Previous candle bullish
+                        (df['close'] < df['open']) &  # Current candle bearish
+                        (df['close'] < df['open'].shift(1)) &  # Close below previous open
+                        (df['open'] > df['close'].shift(1)),  # Open above previous close
+                        -1,  # Bearish engulfing
+                        0  # No pattern
+                    )
+                )
+            
+                # Doji pattern
+                body_size = abs(df['close'] - df['open'])
+                candle_range = df['high'] - df['low']
+                df['doji'] = np.where(
+                    body_size / candle_range < 0.1,  # Very small body relative to range
+                    1,
+                    0
+                )
+            
+                # Hammer pattern
+                df['hammer'] = np.where(
+                    (body_size / candle_range < 0.3) &  # Small body
+                    ((df['low'] - np.minimum(df['open'], df['close'])) > 2 * body_size) &  # Long lower shadow
+                    ((df['high'] - np.maximum(df['open'], df['close'])) < 0.5 * body_size),  # Short upper shadow
+                    1,
+                    0
+                )
+        
+            # Medium-term trend (adjust period based on available data)
+            trend_period = min(50, len(df)-1)
+            if trend_period > 1:
+                df['trend'] = df['close'].rolling(window=trend_period).mean() / df['close'].shift(trend_period) - 1
+        
+            # Remove any NaN values at the beginning
+            df = df.dropna()
+        
+            return df
+    
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {e}")
+            logger.debug(traceback.format_exc())
+            return df
+    
+    def trading_loop(self) -> None:
+        """Main trading loop"""
+        logger.info("Starting main trading loop")
+        
+        last_ml_train_check = time.time()
+        last_balance_update = time.time()
+        last_state_save = time.time()
+        last_backtest_check = time.time()
+        
+        while True:
+            try:
+                # Reset daily PnL if necessary
+                self.state.reset_daily_pnl()
+                
+                # Update higher timeframe data
+                self.update_higher_timeframes()
+                
+                # Update account balance periodically (every 15 minutes)
+                if time.time() - last_balance_update > 15 * 60:
+                    self.state.update_balance(self.client)
+                    self.state.update_correlation_matrix()
+                    self.state.update_market_sentiment()
+                    self.state.assess_data_quality()
+                    last_balance_update = time.time()
+                
+                # Check if need to train ML model
+                if time.time() - last_ml_train_check > 60 * 60:  # Check every hour
+                    if time.time() - self.state.model_manager.last_update > ML_UPDATE_INTERVAL:
+                        if len(self.state.ml_data) >= ML_MIN_TRAINING_SAMPLES:
+                            logger.info(f"Retraining ML model with {len(self.state.ml_data)} samples")
+                            Thread(target=self.state.model_manager.train_model, args=(self.state.ml_data.copy(),)).start()
+                    last_ml_train_check = time.time()
+                
+                # Execute periodic backtesting (every 24 hours)
+                if time.time() - last_backtest_check > 24 * 60 * 60:
+                    try:
+                        # Select random symbol for backtest
+                        import random
+                        test_symbol = random.choice(SYMBOLS)
+                        
+                        if self.check_data_quality_for_backtest(test_symbol):
+                            end_date = datetime.now().strftime("%Y-%m-%d")
+                            start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+                            
+                            logger.info(f"Running periodic backtest on {test_symbol}")
+                            self.backtest(test_symbol, start_date, end_date)
+                    except Exception as e:
+                        logger.error(f"Error in periodic backtest: {e}")
+                    
+                    last_backtest_check = time.time()
+                
+                # Save state periodically
+                if time.time() - last_state_save > 10 * 60:  # Every 10 minutes
+                    self.save_state()
+                    last_state_save = time.time()
+                
+                # Check all active trades for potential exits
+                self.check_all_trades()
+                
+                # Check new opportunities in all symbols
+                for symbol in SYMBOLS:
+                    self.check_trading_opportunity(symbol)
+                
+                # Sleep to avoid excessive CPU usage (still responsive due to WebSockets)
+                time.sleep(5)
+            
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                logger.debug(traceback.format_exc())
+                time.sleep(10)  # Sleep longer on error
+    
+    def update_higher_timeframes(self) -> None:
+        """Updates higher timeframes based on 1m data from WebSockets"""
+        for symbol in SYMBOLS:
+            if symbol not in self.state.market_data or '1m' not in self.state.market_data[symbol]:
+                continue
+                
+            # Update higher timeframes if enough time has passed
+            now = datetime.now()
+            
+            for tf, tf_info in TIMEFRAMES.items():
+                if tf == '1m':
+                    continue  # Already updated via WebSocket
+                
+                # Determine if we should update this timeframe
+                time_diff = (now - self.last_check_time[symbol][tf]).total_seconds() / 60
+                
+                # Extract number from timeframe string
+                update_freq = tf_info.get('update_freq', 15)  # 15 minutes default
+                
+                # Update if more than half the period has passed
+                if time_diff >= update_freq / 2:
+                    try:
+                        klines = self.client.get_klines(
+                            symbol=symbol,
+                            interval=tf_info["interval"],
+                            limit=tf_info["limit"]
+                        )
+                        
+                        df = self.klines_to_dataframe(klines)
+                        self.state.market_data[symbol][tf] = df
+                        self.last_check_time[symbol][tf] = now
+                        
+                        logger.debug(f"Updated {tf} data for {symbol}")
+                    
+                    except Exception as e:
+                        logger.error(f"Error updating {tf} data for {symbol}: {e}")
+    
+    def check_data_quality_for_backtest(self, symbol: str) -> bool:
+        """Checks if data quality is sufficient for backtesting"""
+        if symbol not in self.state.market_data:
+            logger.warning(f"No market data available for {symbol}")
+            return False
+            
+        if '1h' not in self.state.market_data[symbol]:
+            logger.warning(f"No 1h timeframe data available for {symbol}")
+            return False
+            
+        df = self.state.market_data[symbol]['1h']
+        if df.empty:
+            logger.warning(f"Empty dataframe for {symbol} 1h")
+            return False
+            
+        # Check if we have enough data points
+        if len(df) < 30:
+            logger.warning(f"Insufficient data points for {symbol} 1h: {len(df)}")
+            return False
+            
+        # Check if we have required columns
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            logger.warning(f"Missing required columns for {symbol}: {missing}")
+            return False
+            
+        # Check if we have technical indicators
+        indicator_cols = ['rsi', 'macd', 'ema_fast', 'ema_slow']
+        if not any(col in df.columns for col in indicator_cols):
+            logger.warning(f"No technical indicators available for {symbol}")
+            return False
+            
+        # Check missing values
+        missing_pct = df[required_cols].isnull().mean().mean()
+        if missing_pct > 0.2:
+            logger.warning(f"Too many missing values in {symbol} data: {missing_pct:.2%}")
+            return False
+            
+        logger.info(f"Data quality check passed for {symbol}")
+        return True
+    
+    def backtest(self, symbol: str, start_date: str, end_date: str) -> Tuple[Optional[List[Dict]], Optional[Dict]]:
+        """Executes strategy backtesting on historical data"""
+        logger.info(f"Starting backtest for {symbol} from {start_date} to {end_date}")
+        try:
+            # First check if we have real data
+            if symbol in self.state.market_data and '1h' in self.state.market_data[symbol] and not self.state.market_data[symbol]['1h'].empty:
+                df = self.state.market_data[symbol]['1h'].copy()
+                # Ensure unique index
+                df = DataFrameHandler.ensure_unique_index(df)
+                logger.info(f"Using current market data for backtest ({len(df)} candles)")
+            else:
+                # Try to fetch historical data
+                start_time = datetime.strptime(start_date, "%Y-%m-%d")
+                end_time = datetime.strptime(end_date, "%Y-%m-%d")
+                df = self.fetch_historical_data_for_symbol(symbol, "1h", start_time, end_time)
+                
+            # If still no data, generate synthetic data
+            if df.empty:
+                logger.warning(f"No real data available for backtest on {symbol}, using synthetic data")
+                df = self.generate_synthetic_data(symbol, start_date, end_date)
+                
+            if df.empty:
+                logger.error(f"Failed to generate data for backtest on {symbol}")
+                return None, None
+
+            # Check if we have enough data for backtesting
+            if len(df) < 30:
+                logger.warning(f"Insufficient data for backtest on {symbol}: only {len(df)} candles available")
+                return None, None
+
+            balance = INITIAL_BANKROLL
+            trades = []
+            position = None
+            max_balance = balance
+            max_drawdown = 0
+            daily_returns = {}
+
+            # Ensure we have all necessary columns
+            required_cols = ['open', 'high', 'low', 'close', 'volume']
+            for col in required_cols:
+                if col not in df.columns:
+                    df[col] = df['close'] if col in ['open', 'high', 'low'] else 1000000
+
+            # Ensure we have technical indicators
+            if 'rsi' not in df.columns:
+                df = self.add_technical_indicators(df)
+                
+            # If still missing critical indicators, impute them
+            critical_indicators = ['rsi', 'macd', 'macd_signal', 'ema_fast', 'ema_slow', 'atr']
+            for indicator in critical_indicators:
+                if indicator not in df.columns or df[indicator].isnull().all():
+                    if indicator == 'rsi':
+                        df[indicator] = 50  # Neutral RSI
+                    elif indicator in ['macd', 'macd_signal']:
+                        df[indicator] = 0  # Neutral MACD
+                    elif indicator in ['ema_fast', 'ema_slow']:
+                        df[indicator] = df['close']  # Use price
+                    elif indicator == 'atr':
+                        df[indicator] = df['close'] * 0.01  # 1% volatility
+
+            for i in range(min(30, len(df)-1), len(df)):
+                try:
+                    current_time = df.index[i]
+                    current_price = df['close'].iloc[i]
+                    
+                    # Skip if data is missing or invalid
+                    if pd.isna(current_price) or current_price <= 0:
+                        continue
+                    
+                    # Update daily returns
+                    day_key = current_time.strftime("%Y-%m-%d")
+                    if day_key not in daily_returns:
+                        daily_returns[day_key] = {"start_balance": balance, "end_balance": balance}
+                    daily_returns[day_key]["end_balance"] = balance
+                    
+                    # Check exit signal if in position
+                    if position:
+                        exit_signal = False
+                        exit_reason = ""
+                        
+                        # Check stop loss
+                        if current_price <= position["stop_loss"]:
+                            exit_signal = True
+                            exit_reason = "stop_loss"
+                        
+                        # Check take profit
+                        elif current_price >= position["take_profit"]:
+                            exit_signal = True
+                            exit_reason = "take_profit"
+                        
+                        # Check trailing stop
+                        elif position.get("trailing_stop") and current_price <= position["trailing_stop"]:
+                            exit_signal = True
+                            exit_reason = "trailing_stop"
+                        
+                        # Check RSI overbought
+                        elif 'rsi' in df.columns and df['rsi'].iloc[i] > RSI_OVERBOUGHT:
+                            exit_signal = True
+                            exit_reason = "rsi_overbought"
+                        
+                        # Check bearish MACD crossover
+                        elif all(col in df.columns for col in ['macd', 'macd_signal']) and df['macd'].iloc[i-1] > df['macd_signal'].iloc[i-1] and df['macd'].iloc[i] < df['macd_signal'].iloc[i]:
+                            exit_signal = True
+                            exit_reason = "macd_bearish"
+                        
+                        # Update trailing stop if price increases
+                        if position.get("trailing_stop") is None and current_price >= position["entry_price"] * (1 + TRAILING_ACTIVATION_PERCENT/100):
+                            position["trailing_stop"] = current_price * (1 - TRAILING_DISTANCE_PERCENT/100)
+                        elif position.get("trailing_stop") is not None and current_price * (1 - TRAILING_DISTANCE_PERCENT/100) > position["trailing_stop"]:
+                            position["trailing_stop"] = current_price * (1 - TRAILING_DISTANCE_PERCENT/100)
+                        
+                        # Exit position if there's a signal
+                        if exit_signal:
+                            profit_amount = position["quantity"] * (current_price - position["entry_price"])
+                            profit_pct = (current_price / position["entry_price"] - 1) * 100
+                            balance += profit_amount
+                            
+                            trades.append({
+                                "entry_time": position["entry_time"],
+                                "exit_time": current_time,
+                                "entry_price": position["entry_price"],
+                                "exit_price": current_price,
+                                "quantity": position["quantity"],
+                                "profit_amount": profit_amount,
+                                "profit_pct": profit_pct,
+                                "exit_reason": exit_reason
+                            })
+                            
+                            position = None
+                            
+                            # Update max balance and drawdown
+                            if balance > max_balance:
+                                max_balance = balance
+                            drawdown = (max_balance - balance) / max_balance if max_balance > 0 else 0
+                            max_drawdown = max(max_drawdown, drawdown)
+                    
+                    # Check entry signal if not in position
+                    else:
+                        entry_signal = True
+                        
+                        # Skip if missing critical data
+                        if any(pd.isna(df[col].iloc[i]) for col in critical_indicators if col in df.columns):
+                            continue
+                        
+                        # Calculate buy score
+                        buy_score = 3
+                        
+                        # RSI oversold
+                        if 'rsi' in df.columns and not pd.isna(df['rsi'].iloc[i]) and df['rsi'].iloc[i] < RSI_OVERSOLD:
+                            buy_score += 2
+                        
+                        # Bullish MACD crossover
+                        if all(col in df.columns for col in ['macd', 'macd_signal']) and i > 0:
+                            if not pd.isna(df['macd'].iloc[i-1]) and not pd.isna(df['macd_signal'].iloc[i-1]) and \
+                               not pd.isna(df['macd'].iloc[i]) and not pd.isna(df['macd_signal'].iloc[i]):
+                                if df['macd'].iloc[i-1] < df['macd_signal'].iloc[i-1] and df['macd'].iloc[i] > df['macd_signal'].iloc[i]:
+                                    buy_score += 2
+                        
+                        # EMA crossover
+                        if all(col in df.columns for col in ['ema_fast', 'ema_slow']) and i > 0:
+                            if not pd.isna(df['ema_fast'].iloc[i-1]) and not pd.isna(df['ema_slow'].iloc[i-1]) and \
+                               not pd.isna(df['ema_fast'].iloc[i]) and not pd.isna(df['ema_slow'].iloc[i]):
+                                if df['ema_fast'].iloc[i-1] < df['ema_slow'].iloc[i-1] and df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i]:
+                                    buy_score += 2
+                        
+                        # Price near lower Bollinger Band
+                        if all(col in df.columns for col in ['close', 'bb_lower']):
+                            if not pd.isna(df['close'].iloc[i]) and not pd.isna(df['bb_lower'].iloc[i]):
+                                if df['close'].iloc[i] < df['bb_lower'].iloc[i] * 1.01:
+                                    buy_score += 1
+                        
+                        # High relative volume
+                        if 'rel_volume' in df.columns and not pd.isna(df['rel_volume'].iloc[i]) and df['rel_volume'].iloc[i] > VOLUME_THRESHOLD:
+                            buy_score += 1
+                        
+                        # Candlestick patterns
+                        if i > 0 and all(col in df.columns for col in ['open', 'high', 'low', 'close']):
+                            current_candle = {col: df[col].iloc[i] for col in ['open', 'high', 'low', 'close']}
+                            prev_candle = {col: df[col].iloc[i-1] for col in ['open', 'high', 'low', 'close']}
+                            
+                            # Check Hammer pattern
+                            if 'hammer' in df.columns and df['hammer'].iloc[i] == 1:
+                                buy_score += 1
+                            
+                            # Check Engulfing pattern
+                            if 'engulfing' in df.columns and df['engulfing'].iloc[i] == 1:
+                                buy_score += 2
+                        
+                        # Enter position if buy score is high enough
+                        if buy_score >= self.state.buy_score_threshold:
+                            entry_signal = True
+                        
+                        if entry_signal:
+                            # Calculate position size
+                            risk_amount = balance * MAX_RISK_PER_TRADE
+                            atr_value = df['atr'].iloc[i] if 'atr' in df.columns and not pd.isna(df['atr'].iloc[i]) else current_price * 0.01
+                            stop_loss = current_price - atr_value * STOP_LOSS_FACTOR
+                            risk_per_share = current_price - stop_loss
+                            
+                            if risk_per_share <= 0:
+                                continue  # Skip if risk is invalid
+                                
+                            quantity = risk_amount / risk_per_share
+                            cost = quantity * current_price
+                            
+                            if cost > balance * 0.95:
+                                quantity = balance * 0.95 / current_price
+                                cost = quantity * current_price
+                            
+                            if quantity <= 0 or cost <= 0:
+                                continue  # Skip if quantity is invalid
+                            
+                            # Check min_notional
+                            if cost < self.state.min_notional.get(symbol, 10.0):
+                                # Adjust quantity to meet min_notional
+                                quantity = self.state.min_notional.get(symbol, 10.0) / current_price
+                                cost = quantity * current_price
+                                
+                                if cost > balance * 0.95:
+                                    continue  # Skip if we don't have enough balance
+                            
+                            take_profit = current_price + (current_price - stop_loss) * 2  # 2:1 reward-risk ratio
+                            
+                            position = {
+                                "entry_time": current_time,
+                                "entry_price": current_price,
+                                "quantity": quantity,
+                                "stop_loss": stop_loss,
+                                "take_profit": take_profit,
+                                "trailing_stop": None
+                            }
+                            
+                            balance -= cost
+                except Exception as e:
+                    logger.error(f"Error in backtest iteration for {symbol}: {e}")
+                    continue
+
+            # Close any open position at the end
+            if position:
+                final_price = df['close'].iloc[-1]
+                profit_amount = position["quantity"] * (final_price - position["entry_price"])
+                profit_pct = (final_price / position["entry_price"] - 1) * 100
+                balance += profit_amount
+                
+                trades.append({
+                    "entry_time": position["entry_time"],
+                    "exit_time": df.index[-1],
+                    "entry_price": position["entry_price"],
+                    "exit_price": final_price,
+                    "quantity": position["quantity"],
+                    "profit_amount": profit_amount,
+                    "profit_pct": profit_pct,
+                    "exit_reason": "end_of_backtest"
+                })
+
+            # Calculate performance metrics
+            total_profit = balance - INITIAL_BANKROLL
+            win_rate = sum(1 for t in trades if t["profit_amount"] > 0) / len(trades) if trades else 0
+            avg_profit = sum(t["profit_pct"] for t in trades) / len(trades) if trades else 0
+            
+            logger.info(f"Backtest results for {symbol}: Profit={total_profit:.2f} USDT, Trades={len(trades)}, Win Rate={win_rate:.2%}")
+            
+            # Adjust threshold based on backtest results
+            if len(trades) >= 5:
+                if win_rate < 0.4:
+                    self.state.buy_score_threshold = min(8, self.state.buy_score_threshold + 0.5)
+                    logger.info(f"Increasing buy threshold to {self.state.buy_score_threshold} based on backtest results")
+                elif win_rate > 0.6 and avg_profit > 0:
+                    self.state.buy_score_threshold = max(4, self.state.buy_score_threshold - 0.5)
+                    logger.info(f"Decreasing buy threshold to {self.state.buy_score_threshold} based on backtest results")
+            
+            return trades, {
+                "total_profit": total_profit,
+                "win_rate": win_rate,
+                "avg_profit": avg_profit,
+                "max_drawdown": max_drawdown,
+                "trades": len(trades),
+                "daily_returns": daily_returns
+            }
+        except Exception as e:
+            logger.error(f"Error in backtest for {symbol}: {e}")
+            return None, None
+    
+    def generate_synthetic_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Generates synthetic data for backtesting when real data is missing"""
+        logger.info(f"Generating synthetic data for {symbol} from {start_date} to {end_date}")
+        
+        try:
+            # Convert dates to datetime
+            start_time = datetime.strptime(start_date, "%Y-%m-%d")
+            end_time = datetime.strptime(end_date, "%Y-%m-%d")
+            
+            # Create date range
+            date_range = pd.date_range(start=start_time, end=end_time, freq='1H')
+            
+            # Get reference data if available
+            reference_price = 100.0  # Default
+            reference_volatility = 0.01  # Default
+            
+            if symbol in self.state.market_data and '1h' in self.state.market_data[symbol] and not self.state.market_data[symbol]['1h'].empty:
+                ref_df = self.state.market_data[symbol]['1h']
+                if 'close' in ref_df:
+                    reference_price = ref_df['close'].iloc[-1]
+                if 'volatility' in ref_df:
+                    reference_volatility = ref_df['volatility'].iloc[-1] / 100
+                    
+            # Generate synthetic price data
+            np.random.seed(42)  # For reproducibility
+            returns = np.random.normal(0.0001, reference_volatility, len(date_range))
+            prices = reference_price * (1 + np.cumsum(returns))
+            
+            # Create dataframe
+            df = pd.DataFrame(index=date_range)
+            df['close'] = prices
+            df['open'] = df['close'] * (1 + np.random.normal(0, 0.001, len(df)))
+            df['high'] = np.maximum(df['open'], df['close']) * (1 + np.abs(np.random.normal(0, 0.002, len(df))))
+            df['low'] = np.minimum(df['open'], df['close']) * (1 - np.abs(np.random.normal(0, 0.002, len(df))))
+            df['volume'] = np.random.lognormal(10, 1, len(df))
+            
+            # Add technical indicators
+            df = self.add_technical_indicators(df)
+            
+            logger.info(f"Generated {len(df)} synthetic data points for {symbol}")
+            return df
+        except Exception as e:
+            logger.error(f"Error generating synthetic data: {e}")
+            return pd.DataFrame()
+    
+    def check_all_trades(self) -> None:
+        """Checks all active trades for potential exits"""
+        with self.state.lock:
+            for trade_id, trade in list(self.state.trades.items()):
+                try:
+                    symbol = trade['symbol']
+                    
+                    # Get current price (use last known price from WebSocket if available)
+                    current_price = self.state.last_prices.get(symbol)
+                    
+                    # If no WebSocket price, fetch from API
+                    if current_price is None:
+                        ticker = self.client.get_symbol_ticker(symbol=symbol)
+                            
+                        if isinstance(ticker, dict) and 'price' in ticker:
+                            current_price = float(ticker['price'])
+                        else:
+                            logger.error(f"Invalid ticker response for {symbol}: {ticker}")
+                            continue
+                    
+                    # Check exit conditions
+                    self.check_exit_conditions(trade_id, trade, current_price)
+                
+                except Exception as e:
+                    logger.error(f"Error checking trade {trade_id}: {e}")
+    
+    def check_exit_conditions(self, trade_id: str, trade: Dict[str, Any], current_price: float) -> None:
+        """Checks if a trade should be closed based on current price and conditions"""
+        try:
+            entry_price = trade['entry_price']
+            symbol = trade['symbol']
+            
+            # Calculate current profit/loss percentage
+            profit_pct = ((current_price / entry_price) - 1) * 100
+            
+            # Update trade with current information
+            trade['current_price'] = current_price
+            trade['current_profit_pct'] = profit_pct
+            trade['last_updated'] = datetime.now().isoformat()
+            
+            # Check maximum hold time
+            entry_time = datetime.fromisoformat(trade['entry_time']) if isinstance(trade['entry_time'], str) else trade['entry_time']
+            hold_time = datetime.now() - entry_time
+            if hold_time > timedelta(hours=MAX_HOLD_TIME_HOURS):
+                self.exit_trade(trade_id, current_price, 'max_hold_time')
+                return
+            
+            # Check stop loss
+            if profit_pct <= -STOP_LOSS_PERCENT:
+                self.exit_trade(trade_id, current_price, 'stop_loss')
+                return
+            
+            # Check partial profit targets
+            remaining_qty = trade.get('remaining_qty', trade['quantity'])
+            
+            # Check if we've already taken partial profits
+            taken_levels = trade.get('taken_profit_levels', [])
+            
+            # Process each profit level that hasn't been taken yet
+            for i, level in enumerate(TAKE_PROFIT_LEVELS):
+                level_num = i + 1
+                
+                # Skip if this level has already been taken
+                if level_num in taken_levels:
+                    continue
+                
+                # Check if price has reached this level
+                if 'percent' in level and profit_pct >= level['percent']:
+                    # Calculate portion to sell
+                    portion = level['portion']
+                    sell_qty = trade['quantity'] * portion
+                    
+                    # Execute partial exit
+                    self.partial_exit_trade(trade_id, current_price, sell_qty, f'profit_level_{level_num}')
+                    
+                    # Mark this level as taken
+                    if 'taken_profit_levels' not in trade:
+                        trade['taken_profit_levels'] = []
+                    trade['taken_profit_levels'].append(level_num)
+                    
+                    logger.info(f"Partial profit taken for {symbol} at {profit_pct:.2f}% (Level {level_num})")
+            
+            # Check trailing stop if activated
+            if profit_pct >= TRAILING_ACTIVATION_PERCENT:
+                # If trailing stop not yet defined, define it
+                if 'trailing_stop' not in trade:
+                    trade['trailing_stop'] = current_price * (1 - TRAILING_DISTANCE_PERCENT/100)
+                    logger.info(f"Trailing stop activated for {symbol} at {trade['trailing_stop']:.8f}")
+                else:
+                    # Update trailing stop if price went up
+                    new_stop = current_price * (1 - TRAILING_DISTANCE_PERCENT/100)
+                    if new_stop > trade['trailing_stop']:
+                        trade['trailing_stop'] = new_stop
+                        logger.debug(f"Trailing stop updated for {symbol} to {trade['trailing_stop']:.8f}")
+                
+                # Check if price hit trailing stop
+                if current_price <= trade['trailing_stop']:
+                    self.exit_trade(trade_id, current_price, 'trailing_stop')
+                    return
+            
+            # Check technical reversal (if we have profit)
+            if profit_pct > 0:
+                if self.detect_reversal(symbol):
+                    self.exit_trade(trade_id, current_price, 'technical_reversal')
+                    return
+            
+            # Check exit score
+            exit_score = self.calculate_exit_score(trade_id)
+            if exit_score >= 8:
+                self.exit_trade(trade_id, current_price, 'exit_signal')
+                return
+        
+        except Exception as e:
+            logger.error(f"Error in check_exit_conditions: {e}")
+    
+    def detect_reversal(self, symbol: str) -> bool:
+        """Detects potential price reversal using technical indicators"""
+        try:
+            # Get latest data for multiple timeframes
+            df_1m = self.state.market_data[symbol].get('1m', pd.DataFrame())
+            df_5m = self.state.market_data[symbol].get('5m', pd.DataFrame())
+            
+            # Ensure unique indices
+            df_1m = DataFrameHandler.ensure_unique_index(df_1m)
+            df_5m = DataFrameHandler.ensure_unique_index(df_5m)
+            
+            if df_1m.empty or df_5m.empty:
+                return False
+            
+            # Check reversal signals
+            # 1. RSI divergence
+            rsi_1m = df_1m['rsi'].iloc[-1]
+            rsi_5m = df_5m['rsi'].iloc[-1]
+            price_rising = df_1m['close'].iloc[-1] > df_1m['close'].iloc[-2]
+            
+            # Bearish divergence: price making higher highs, RSI making lower highs
+            if price_rising and rsi_1m < df_1m['rsi'].iloc[-2] and rsi_5m < df_5m['rsi'].iloc[-2]:
+                return True
+            
+            # 2. Overbought conditions in multiple timeframes
+            if rsi_1m > 70 and rsi_5m > 70:
+                return True
+            
+            # 3. Bearish candle patterns in last candle
+            if df_1m['engulfing'].iloc[-1] < 0 or df_1m['doji'].iloc[-1] > 0:
+                return True
+            
+            # 4. Bearish MACD crossover
+            if df_1m['macd'].iloc[-2] > df_1m['macd_signal'].iloc[-2] and df_1m['macd'].iloc[-1] < df_1m['macd_signal'].iloc[-1]:
+                return True
+            
+            # 5. Price rejected at upper Bollinger Band
+            close = df_1m['close'].iloc[-1]
+            bb_upper = df_1m['bb_upper'].iloc[-1]
+            if close > bb_upper * 0.98 and close < bb_upper and df_1m['close'].iloc[-2] > df_1m['close'].iloc[-1]:
+                return True
+            
+            # 6. Shooting Star candle pattern
+            if 'hammer' in df_1m.columns and df_1m['hammer'].iloc[-1] == 0:  # Not a hammer
+                body_size = abs(df_1m['close'].iloc[-1] - df_1m['open'].iloc[-1])
+                upper_shadow = df_1m['high'].iloc[-1] - max(df_1m['close'].iloc[-1], df_1m['open'].iloc[-1])
+                lower_shadow = min(df_1m['close'].iloc[-1], df_1m['open'].iloc[-1]) - df_1m['low'].iloc[-1]
+                
+                if upper_shadow > 2 * body_size and lower_shadow < 0.5 * body_size:
+                    return True
+            
+            return False
+        
+        except Exception as e:
+            logger.error(f"Error detecting reversal: {e}")
+            return False
+    
+    def calculate_exit_score(self, trade_id: str) -> float:
+        """Calculates exit score for trade (0-10)"""
+        trade = self.state.trades.get(trade_id)
+        if not trade:
+            return 0
+            
+        symbol = trade['symbol']
+        if symbol not in self.state.market_data:
+            return 0
+            
+        exit_score = 0
+        
+        # Get current price
+        current_price = self.state.last_prices.get(symbol)
+        if not current_price:
+            return 0
+            
+        # Check stop loss
+        if current_price <= trade.get('stop_loss', 0):
+            return 10  # Immediate exit
+            
+        # Check take profit
+        if current_price >= trade.get('take_profit', float('inf')):
+            return 10  # Immediate exit
+            
+        # Check trailing stop
+        if trade.get('trailing_stop') and current_price <= trade['trailing_stop']:
+            return 10  # Immediate exit
+            
+        # Check 1-minute timeframes
+        if '1m' in self.state.market_data[symbol] and not self.state.market_data[symbol]['1m'].empty:
+            df_1m = self.state.market_data[symbol]['1m']
+            # Ensure unique index
+            df_1m = DataFrameHandler.ensure_unique_index(df_1m)
+            last_row = df_1m.iloc[-1]
+            
+            # RSI overbought
+            if 'rsi' in last_row and not pd.isna(last_row['rsi']) and last_row['rsi'] > RSI_OVERBOUGHT:
+                exit_score += 2
+                
+            # Bearish MACD crossover
+            if len(df_1m) > 1 and 'macd' in df_1m.columns and 'macd_signal' in df_1m.columns:
+                if df_1m['macd'].iloc[-2] > df_1m['macd_signal'].iloc[-2] and df_1m['macd'].iloc[-1] < df_1m['macd_signal'].iloc[-1]:
+                    exit_score += 2
+                    
+            # Reversal candle patterns
+            if 'engulfing' in df_1m.columns and df_1m['engulfing'].iloc[-1] == -1:  # Bearish engulfing
+                exit_score += 2
+                
+            # Price near upper Bollinger Band
+            if 'close' in last_row and 'bb_upper' in last_row and not pd.isna(last_row['bb_upper']):
+                if last_row['close'] > last_row['bb_upper'] * 0.98:
+                    exit_score += 1
+                    
+        # Check 5-minute timeframe
+        if '5m' in self.state.market_data[symbol] and not self.state.market_data[symbol]['5m'].empty:
+            df_5m = self.state.market_data[symbol]['5m']
+            # Ensure unique index
+            df_5m = DataFrameHandler.ensure_unique_index(df_5m)
+            last_row = df_5m.iloc[-1]
+            
+            # Bearish EMA crossover
+            if 'ema_fast' in last_row and 'ema_slow' in last_row:
+                if len(df_5m) > 1 and df_5m['ema_fast'].iloc[-2] > df_5m['ema_slow'].iloc[-2] and df_5m['ema_fast'].iloc[-1] < df_5m['ema_slow'].iloc[-1]:
+                    exit_score += 2
+                    
+            # Stochastic overbought and falling
+            if 'slowk' in last_row and 'slowd' in last_row:
+                if last_row['slowk'] > 80 and last_row['slowk'] < last_row['slowd']:
+                    exit_score += 1
+                    
+        # ML model prediction
+        ml_probability = self.predict_ml_signal(symbol)
+        if ml_probability < 0.3:
+            exit_score += 2
+            
+        # Time in trade (time-based exit)
+        entry_time = datetime.fromisoformat(trade['entry_time']) if isinstance(trade['entry_time'], str) else trade['entry_time']
+        hours_in_trade = (datetime.now() - entry_time).total_seconds() / 3600
+        if hours_in_trade > MAX_HOLD_TIME_HOURS * 0.8:  # 80% of max time
+            exit_score += 2
+            
+        # Profit taking
+        profit_pct = (current_price / trade['entry_price'] - 1) * 100
+        if profit_pct > 5:  # Take some profit at 5%
+            exit_score += 1
+        if profit_pct > 10:  # Take more profit at 10%
+            exit_score += 2
+            
+        # Market sentiment
+        if self.state.market_sentiment.get('sentiment') == 'strongly_bearish':
+            exit_score += 1
+            
+        return exit_score
+    
+    def predict_ml_signal(self, symbol: str) -> float:
+        """Predict trading signal using ML model"""
+        if not self.state.model_manager.model or symbol not in self.state.market_data:
+            return 0.5  # Neutral value if no model or data
+            
+        try:
+            # Get latest data
+            if '1m' not in self.state.market_data[symbol] or self.state.market_data[symbol]['1m'].empty:
+                return 0.5
+                
+            df_1m = self.state.market_data[symbol]['1m']
+            # Ensure unique index
+            df_1m = DataFrameHandler.ensure_unique_index(df_1m)
+            last_row = df_1m.iloc[-1]
+            
+            # Extract features for prediction
+            features = self.extract_features(last_row)
+            
+            # Make prediction using model
+            prob = self.state.model_manager.predict(features)
+            
+            logger.debug(f"ML Prediction for {symbol}: Probability of profit = {prob:.2f}")
+            return prob
+        
+        except Exception as e:
+            logger.error(f"Error predicting ML signal for {symbol}: {e}")
+            return 0.5  # Neutral value on error
+    
+    def extract_features(self, row: pd.Series) -> Dict[str, float]:
+        try:
+            # Default values for when indicators are not available
+            features = {
+                'rsi': row.get('rsi', 50),
+                'macd': row.get('macd', 0) - row.get('macd_signal', 0),
+                'ema_fast': row.get('ema_fast', 0) - row.get('ema_slow', 0),
+                'slowk': row.get('slowk', 50) - row.get('slowd', 50),
+                'rel_volume': row.get('rel_volume', 1),
+                'volatility': row.get('volatility', 1),
+                'trend': row.get('trend', 0),
+                'adx': row.get('adx', 20),
+                'cci': row.get('cci', 0),
+                'mfi': row.get('mfi', 50),
+                'bb_position': row.get('close', 0) / row.get('bb_middle', row.get('close', 1)) - 1,
+                'bb_lower_touch': 1 if row.get('close', 0) < row.get('bb_lower', 0) else 0,
+                'bb_upper_touch': 1 if row.get('close', 0) > row.get('bb_upper', 0) else 0,
+                'engulfing': row.get('engulfing', 0),
+                'doji': row.get('doji', 0),
+                'hammer': row.get('hammer', 0),
+                'price_change_pct': row.get('price_change_pct', 0),
+                'obv_change': 0  # Default value
+            }
+            
+            # Calculate OBV change if available
+            if 'obv' in row and isinstance(row.index, pd.DatetimeIndex):
+                df = row.to_frame().T
+                if len(df) > 1 and 'obv' in df.columns:
+                    features['obv_change'] = (df['obv'].iloc[-1] / df['obv'].iloc[-2] - 1) if df['obv'].iloc[-2] != 0 else 0
+            
+            # Ensure all values are numeric
+            for key, value in features.items():
+                if pd.isna(value) or not np.isfinite(value):
+                    features[key] = 0
+            
+            return features
+        
+        except Exception as e:
+            logger.error(f"Error extracting features: {e}")
+            # Return default features on error
+            return {
+                'rsi': 50, 'macd': 0, 'ema_fast': 0, 'slowk': 0, 'rel_volume': 1,
+                'volatility': 1, 'trend': 0, 'adx': 20, 'cci': 0, 'mfi': 50,
+                'bb_position': 0, 'bb_lower_touch': 0, 'bb_upper_touch': 0,
+                'engulfing': 0, 'doji': 0, 'hammer': 0, 'price_change_pct': 0, 'obv_change': 0
+            }
+    
+    def check_trading_opportunity(self, symbol: str) -> None:
+        try:
+            # Check if we already have active trades for this symbol
+            active_trades_for_symbol = sum(1 for t in self.state.trades.values() if t['symbol'] == symbol)
+            if active_trades_for_symbol >= MAX_TRADES_PER_SYMBOL:
+                return
+        
+            # Check if we've reached the limit of simultaneous trades
+            if len(self.state.trades) >= MAX_CONCURRENT_TRADES:
+                return
+        
+            # Check if we have market data for this symbol
+            if symbol not in self.state.market_data:
+                return
+            
+            # Check if we have 1m and 5m data
+            if '1m' not in self.state.market_data[symbol] or '5m' not in self.state.market_data[symbol]:
+                return
+            
+            df_1m = self.state.market_data[symbol]['1m']
+            df_5m = self.state.market_data[symbol]['5m']
+        
+            # Ensure unique indices
+            df_1m = DataFrameHandler.ensure_unique_index(df_1m)
+            df_5m = DataFrameHandler.ensure_unique_index(df_5m)
+        
+            if df_1m.empty or df_5m.empty:
+                return
+            
+            # Check if we have enough data for analysis
+            min_data_required = 10  # Reduced from 30 to allow earlier operations
+            if len(df_1m) < min_data_required or len(df_5m) < min_data_required:
+                logger.debug(f"Insufficient data for analysis of {symbol}: 1m={len(df_1m)}, 5m={len(df_5m)}")
+                return
+            
+            # Get current price
+            current_price = self.state.last_prices.get(symbol)
+            if not current_price:
+                ticker = self.client.get_symbol_ticker(symbol=symbol)
+                
+                if isinstance(ticker, dict) and 'price' in ticker:
+                    current_price = float(ticker['price'])
+                else:
+                    logger.error(f"Invalid ticker response for {symbol}: {ticker}")
+                    return
+                
+                self.state.last_prices[symbol] = current_price
+        
+            # Calculate buy score
+            buy_score = self.calculate_buy_score(symbol)
+        
+            # Check if score is high enough
+            if buy_score >= self.state.buy_score_threshold:
+                # Check if we have available balance
+                if self.state.available_balance <= 0:
+                    logger.warning(f"No available balance for new trade on {symbol}")
+                    return
+                
+                # Calculate position size
+                risk_amount = self.state.available_balance * MAX_RISK_PER_TRADE
+            
+                # Get ATR for stop loss calculation
+                atr_value = df_1m['atr'].iloc[-1] if 'atr' in df_1m.columns and not pd.isna(df_1m['atr'].iloc[-1]) else current_price * 0.01
+            
+                # Calculate stop loss based on ATR
+                stop_loss = current_price - atr_value * STOP_LOSS_FACTOR
+            
+                # Calculate risk per unit
+                risk_per_unit = current_price - stop_loss
+            
+                # Calculate quantity
+                quantity = risk_amount / risk_per_unit
+            
+                # Calculate total cost
+                cost = quantity * current_price
+            
+                # Check if cost is greater than available balance
+                if cost > self.state.available_balance * 0.95:
+                    quantity = self.state.available_balance * 0.95 / current_price
+                    cost = quantity * current_price
+            
+                # Check min_notional
+                if cost < self.state.min_notional.get(symbol, 10.0):
+                    # Adjust quantity to meet min_notional
+                    quantity = self.state.min_notional.get(symbol, 10.0) / current_price
+                    cost = quantity * current_price
+                
+                    if cost > self.state.available_balance * 0.95:
+                        logger.warning(f"Insufficient balance for min_notional on {symbol}")
+                        return
+            
+                # Calculate take profit
+                take_profit = current_price + (current_price - stop_loss) * 2  # 2:1 reward-risk ratio
+            
+                # Execute buy order
+                self.enter_trade(symbol, current_price, quantity, stop_loss, take_profit)
+        
+        except Exception as e:
+            logger.error(f"Error checking trading opportunity for {symbol}: {e}")
+    
+    def calculate_buy_score(self, symbol: str) -> float:
+        """Calculates buy score for a symbol based on technical indicators"""
+        try:
+            if symbol not in self.state.market_data:
+                return 0
+                
+            buy_score = 0
+            
+            # Get dataframes for different timeframes
+            df_1m = self.state.market_data[symbol].get('1m', pd.DataFrame())
+            df_5m = self.state.market_data[symbol].get('5m', pd.DataFrame())
+            df_15m = self.state.market_data[symbol].get('15m', pd.DataFrame())
+            df_1h = self.state.market_data[symbol].get('1h', pd.DataFrame())
+            
+            # Ensure unique indices
+            df_1m = DataFrameHandler.ensure_unique_index(df_1m)
+            df_5m = DataFrameHandler.ensure_unique_index(df_5m)
+            df_15m = DataFrameHandler.ensure_unique_index(df_15m)
+            df_1h = DataFrameHandler.ensure_unique_index(df_1h)
+            
+            if df_1m.empty or df_5m.empty:
+                return 0
+            
+            # RSI oversold conditions (weighted by timeframe)
+            if 'rsi' in df_1m.columns and not pd.isna(df_1m['rsi'].iloc[-1]) and df_1m['rsi'].iloc[-1] < RSI_OVERSOLD:
+                buy_score += 2
+                
+            if 'rsi' in df_5m.columns and not pd.isna(df_5m['rsi'].iloc[-1]) and df_5m['rsi'].iloc[-1] < RSI_OVERSOLD:
+                buy_score += 1
+                
+            if not df_15m.empty and 'rsi' in df_15m.columns and not pd.isna(df_15m['rsi'].iloc[-1]) and df_15m['rsi'].iloc[-1] < RSI_OVERSOLD:
+                buy_score += 1
+            
+            # MACD bullish crossover
+            if len(df_1m) > 1 and 'macd' in df_1m.columns and 'macd_signal' in df_1m.columns:
+                if (not pd.isna(df_1m['macd'].iloc[-2]) and not pd.isna(df_1m['macd_signal'].iloc[-2]) and
+                    not pd.isna(df_1m['macd'].iloc[-1]) and not pd.isna(df_1m['macd_signal'].iloc[-1])):
+                    if df_1m['macd'].iloc[-2] < df_1m['macd_signal'].iloc[-2] and df_1m['macd'].iloc[-1] > df_1m['macd_signal'].iloc[-1]:
+                        buy_score += 2
+            
+            if len(df_5m) > 1 and 'macd' in df_5m.columns and 'macd_signal' in df_5m.columns:
+                if (not pd.isna(df_5m['macd'].iloc[-2]) and not pd.isna(df_5m['macd_signal'].iloc[-2]) and
+                    not pd.isna(df_5m['macd'].iloc[-1]) and not pd.isna(df_5m['macd_signal'].iloc[-1])):
+                    if df_5m['macd'].iloc[-2] < df_5m['macd_signal'].iloc[-2] and df_5m['macd'].iloc[-1] > df_5m['macd_signal'].iloc[-1]:
+                        buy_score += 1
+            
+            # EMA crossover (bullish)
+            if len(df_1m) > 1 and 'ema_fast' in df_1m.columns and 'ema_slow' in df_1m.columns:
+                if (not pd.isna(df_1m['ema_fast'].iloc[-2]) and not pd.isna(df_1m['ema_slow'].iloc[-2]) and
+                    not pd.isna(df_1m['ema_fast'].iloc[-1]) and not pd.isna(df_1m['ema_slow'].iloc[-1])):
+                    if df_1m['ema_fast'].iloc[-2] < df_1m['ema_slow'].iloc[-2] and df_1m['ema_fast'].iloc[-1] > df_1m['ema_slow'].iloc[-1]:
+                        buy_score += 2
+            
+            if len(df_5m) > 1 and 'ema_fast' in df_5m.columns and 'ema_slow' in df_5m.columns:
+                if (not pd.isna(df_5m['ema_fast'].iloc[-2]) and not pd.isna(df_5m['ema_slow'].iloc[-2]) and
+                    not pd.isna(df_5m['ema_fast'].iloc[-1]) and not pd.isna(df_5m['ema_slow'].iloc[-1])):
+                    if df_5m['ema_fast'].iloc[-2] < df_5m['ema_slow'].iloc[-2] and df_5m['ema_fast'].iloc[-1] > df_5m['ema_slow'].iloc[-1]:
+                        buy_score += 1
+            
+            # Bollinger Bands - price near lower band
+            if 'close' in df_1m.columns and 'bb_lower' in df_1m.columns:
+                if (not pd.isna(df_1m['close'].iloc[-1]) and not pd.isna(df_1m['bb_lower'].iloc[-1])):
+                    if df_1m['close'].iloc[-1] < df_1m['bb_lower'].iloc[-1] * 1.01:  # Within 1% of lower band
+                        buy_score += 1
+            
+            # Volume analysis
+            if 'rel_volume' in df_1m.columns and not pd.isna(df_1m['rel_volume'].iloc[-1]) and df_1m['rel_volume'].iloc[-1] > VOLUME_THRESHOLD:
+                buy_score += 1
+            
+            # Stochastic oversold
+            if 'slowk' in df_1m.columns and 'slowd' in df_1m.columns:
+                if (not pd.isna(df_1m['slowk'].iloc[-1]) and not pd.isna(df_1m['slowd'].iloc[-1])):
+                    if df_1m['slowk'].iloc[-1] < 20 and df_1m['slowd'].iloc[-1] < 20:
+                        buy_score += 1
+            
+            # Candlestick patterns
+            if 'engulfing' in df_1m.columns and df_1m['engulfing'].iloc[-1] == 1:  # Bullish engulfing
+                buy_score += 2
+                
+            if 'hammer' in df_1m.columns and df_1m['hammer'].iloc[-1] == 1:  # Hammer pattern
+                buy_score += 1
+                
+            if 'doji' in df_1m.columns and df_1m['doji'].iloc[-1] == 1:  # Doji (indecision)
+                buy_score += 0.5
+            
+            # Price action
+            if len(df_1m) > 2:
+                # Check for higher lows
+                if (df_1m['low'].iloc[-1] > df_1m['low'].iloc[-2] and 
+                    df_1m['low'].iloc[-2] > df_1m['low'].iloc[-3]):
+                    buy_score += 1
+                    
+                # Check for bullish momentum
+                if (df_1m['close'].iloc[-1] > df_1m['open'].iloc[-1] and
+                    df_1m['close'].iloc[-2] > df_1m['open'].iloc[-2]):
+                    buy_score += 0.5
+            
+            # Market regime analysis
+            if 'volatility' in df_1m.columns and not pd.isna(df_1m['volatility'].iloc[-1]):
+                volatility = df_1m['volatility'].iloc[-1]
+                if 1 < volatility < 3:  # Moderate volatility is good for trading
+                    buy_score += 0.5
+            
+            # Trend analysis
+            if not df_1h.empty and 'trend' in df_1h.columns and not pd.isna(df_1h['trend'].iloc[-1]):
+                if df_1h['trend'].iloc[-1] > 0:  # Uptrend
+                    buy_score += 1
+            
+            # ADX trend strength
+            if 'adx' in df_1m.columns and not pd.isna(df_1m['adx'].iloc[-1]):
+                if df_1m['adx'].iloc[-1] > 25:  # Strong trend
+                    buy_score += 0.5
+            
+            # CCI oversold
+            if 'cci' in df_1m.columns and not pd.isna(df_1m['cci'].iloc[-1]):
+                if df_1m['cci'].iloc[-1] < -100:  # Oversold
+                    buy_score += 1
+            
+            # MFI oversold
+            if 'mfi' in df_1m.columns and not pd.isna(df_1m['mfi'].iloc[-1]):
+                if df_1m['mfi'].iloc[-1] < 20:  # Oversold
+                    buy_score += 1
+            
+            # ML model prediction
+            ml_probability = self.predict_ml_signal(symbol)
+            if ml_probability > ML_PROBABILITY_THRESHOLD:
+                buy_score += 2
+            elif ml_probability > 0.55:
+                buy_score += 1
+            
+            # Market sentiment bonus
+            market_sentiment = self.state.market_sentiment.get('sentiment', 'neutral')
+            if market_sentiment in ['bullish', 'strongly_bullish']:
+                buy_score += 0.5
+            elif market_sentiment in ['bearish', 'strongly_bearish']:
+                buy_score -= 1
+            
+            # AI advisor input (if available)
+            if self.ai_advisor and hasattr(self.ai_advisor, 'analyze_market_context'):
+                try:
+                    ai_analysis = self.ai_advisor.analyze_market_context(symbol)
+                    if ai_analysis['recommendation'] == 'buy' and ai_analysis['confidence'] > 0.7:
+                        buy_score += 1
+                    elif ai_analysis['recommendation'] == 'sell':
+                        buy_score -= 1
+                except Exception as e:
+                    logger.debug(f"AI advisor error for {symbol}: {e}")
+            
+            # Data quality penalty
+            data_quality = self.state.data_quality.get(symbol, {}).get('score', 1.0)
+            if data_quality < 0.5:
+                buy_score *= 0.5  # Reduce score for poor data quality
+            
+            logger.info(f"Buy score for {symbol}: {buy_score:.1f}")
+            return buy_score
+        
+        except Exception as e:
+            logger.error(f"Error calculating buy score for {symbol}: {e}")
+            return 0
+    
+    def enter_trade(self, symbol: str, price: float, quantity: float, stop_loss: float, take_profit: float) -> None:
+        """Enters a new trade"""
+        try:
+            cost = price * quantity
+            if cost > self.state.available_balance:
+                logger.warning(f"Insufficient balance for trade on {symbol}: need {cost:.2f}, have {self.state.available_balance:.2f}")
+                return
+            
+            # Check daily loss limit
+            if self.state.daily_pnl < -self.state.account_balance * DAILY_LOSS_LIMIT_PERCENT / 100:
+                logger.warning(f"Daily loss limit reached, skipping trade on {symbol}")
+                return
+            
+            # Generate unique trade ID
+            trade_id = f"{symbol}_{int(time.time())}_{hash(str(price) + str(quantity))}"
+            
+            # Create trade record
+            trade = {
+                'id': trade_id,
+                'symbol': symbol,
+                'entry_price': price,
+                'quantity': quantity,
+                'remaining_qty': quantity,
+                'cost': cost,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'entry_time': datetime.now().isoformat(),
+                'status': 'active',
+                'partial_exits': []
+            }
+            
+            # Update state
+            with self.state.lock:
+                self.state.trades[trade_id] = trade
+                self.state.available_balance -= cost
+            
+            logger.info(f"✅ Entered trade on {symbol}: {quantity:.6f} @ {price:.8f} USDT (Cost: {cost:.2f} USDT, ID: {trade_id})")
+            
+            # Add to trade queue for monitoring
+            self.state.trade_queue.append({
+                'time': datetime.now().isoformat(),
+                'action': 'entry',
+                'symbol': symbol,
+                'price': price,
+                'quantity': quantity,
+                'cost': cost
+            })
+            
+            # Save state after entering trade
+            self.save_state()
+        
+        except Exception as e:
+            logger.error(f"Error entering trade on {symbol}: {e}")
+    
+    def exit_trade(self, trade_id: str, price: float, reason: str) -> None:
+        """Exits a complete trade"""
+        try:
+            if trade_id not in self.state.trades:
+                logger.warning(f"Trade {trade_id} not found for exit")
+                return
+                
+            trade = self.state.trades[trade_id]
+            symbol = trade['symbol']
+            entry_price = trade['entry_price']
+            quantity = trade['remaining_qty']
+            
+            # Calculate profit/loss
+            profit_amount = quantity * (price - entry_price)
+            profit_pct = ((price / entry_price) - 1) * 100
+            
+            # Update balances
+            with self.state.lock:
+                self.state.available_balance += (quantity * price)
+                self.state.daily_pnl += profit_amount
+                
+                # Create trade record for history
+                trade_record = {
+                    'id': trade_id,
+                    'symbol': symbol,
+                    'entry_price': entry_price,
+                    'exit_price': price,
+                    'quantity': trade['quantity'],
+                    'remaining_qty': quantity,
+                    'profit_amount': profit_amount,
+                    'profit_pct': profit_pct,
+                    'entry_time': trade['entry_time'],
+                    'exit_time': datetime.now().isoformat(),
+                    'exit_reason': reason,
+                    'partial_exits': trade.get('partial_exits', []),
+                    'is_partial': False
+                }
+                
+                self.state.trade_history.append(trade_record)
+                del self.state.trades[trade_id]
+            
+            # Log the exit
+            profit_emoji = "🟢" if profit_amount > 0 else "🔴"
+            logger.info(f"{profit_emoji} Exited trade on {symbol}: {quantity:.6f} @ {price:.8f} "
+                       f"({profit_pct:+.2f}%, {profit_amount:+.2f} USDT) - Reason: {reason}")
+            
+            # Add to trade queue
+            self.state.trade_queue.append({
+                'time': datetime.now().isoformat(),
+                'action': 'exit',
+                'symbol': symbol,
+                'price': price,
+                'quantity': quantity,
+                'profit_pct': profit_pct,
+                'profit_amount': profit_amount,
+                'reason': reason
+            })
+            
+            # Add data for ML training
+            if profit_amount != 0:
+                try:
+                    entry_time = datetime.fromisoformat(trade['entry_time']) if isinstance(trade['entry_time'], str) else trade['entry_time']
+                    
+                    # Get market data at entry time for feature extraction
+                    if symbol in self.state.market_data and '1m' in self.state.market_data[symbol]:
+                        df = self.state.market_data[symbol]['1m']
+                        df = DataFrameHandler.ensure_unique_index(df)
+                        
+                        if not df.empty and isinstance(df.index, pd.DatetimeIndex):
+                            # Find closest timestamp to entry time
+                            closest_idx = df.index.get_indexer([entry_time], method='nearest')[0]
+                            
+                            if closest_idx >= 0 and closest_idx < len(df):
+                                entry_row = df.iloc[closest_idx]
+                                features = self.extract_features(entry_row)
+                                features['profit'] = profit_amount
+                                self.state.ml_data.append(features)
+                                
+                                # Limit ML data size
+                                if len(self.state.ml_data) > 5000:
+                                    self.state.ml_data = self.state.ml_data[-3000:]  # Keep last 3000
+                except Exception as e:
+                    logger.error(f"Error adding ML data: {e}")
+            
+            # Save state and update metrics
+            self.save_state()
+            self.state.update_performance_metrics()
+        
+        except Exception as e:
+            logger.error(f"Error exiting trade {trade_id}: {e}")
+    
+    def partial_exit_trade(self, trade_id: str, price: float, quantity: float, reason: str) -> None:
+        """Exits a portion of a trade"""
+        try:
+            if trade_id not in self.state.trades:
+                logger.warning(f"Trade {trade_id} not found for partial exit")
+                return
+                
+            trade = self.state.trades[trade_id]
+            symbol = trade['symbol']
+            entry_price = trade['entry_price']
+            
+            # Validate quantity
+            if quantity > trade['remaining_qty']:
+                quantity = trade['remaining_qty']
+                
+            if quantity <= 0:
+                logger.warning(f"Invalid quantity for partial exit: {quantity}")
+                return
+            
+            # Calculate profit/loss for this portion
+            profit_amount = quantity * (price - entry_price)
+            profit_pct = ((price / entry_price) - 1) * 100
+            
+            # Update balances and trade
+            with self.state.lock:
+                self.state.available_balance += (quantity * price)
+                self.state.daily_pnl += profit_amount
+                
+                # Update remaining quantity
+                trade['remaining_qty'] -= quantity
+                
+                # Record partial exit
+                partial_exit = {
+                    'exit_price': price,
+                    'quantity': quantity,
+                    'profit_amount': profit_amount,
+                    'profit_pct': profit_pct,
+                    'exit_time': datetime.now().isoformat(),
+                    'exit_reason': reason
+                }
+                
+                if 'partial_exits' not in trade:
+                    trade['partial_exits'] = []
+                    
+                trade['partial_exits'].append(partial_exit)
+                
+                # Create trade record for history
+                trade_record = {
+                    'id': f"{trade_id}_partial_{len(trade['partial_exits'])}",
+                    'symbol': symbol,
+                    'entry_price': entry_price,
+                    'exit_price': price,
+                    'quantity': quantity,
+                    'profit_amount': profit_amount,
+                    'profit_pct': profit_pct,
+                    'entry_time': trade['entry_time'],
+                    'exit_time': datetime.now().isoformat(),
+                    'exit_reason': reason,
+                    'is_partial': True
+                }
+                
+                self.state.trade_history.append(trade_record)
+                
+                # If no quantity remaining, remove the trade
+                if trade['remaining_qty'] <= 0:
+                    del self.state.trades[trade_id]
+            
+            # Log the partial exit
+            profit_emoji = "🟢" if profit_amount > 0 else "🔴"
+            logger.info(f"{profit_emoji} Partial exit on {symbol}: {quantity:.6f} @ {price:.8f} "
+                       f"({profit_pct:+.2f}%, {profit_amount:+.2f} USDT) - Reason: {reason}")
+            
+            # Save state
+            self.save_state()
+        
+        except Exception as e:
+            logger.error(f"Error in partial exit for trade {trade_id}: {e}")
+
+# Backtesting functionality
+class Backtester:
+    """Class for executing strategy backtesting"""
+    
+    def __init__(self, trading_bot):
+        self.bot = trading_bot
+        self.state = trading_bot.state
+    
+    def run_backtest(self, symbol: str, start_date: str, end_date: str) -> Tuple[Optional[List[Dict]], Optional[Dict]]:
+        """Executes backtesting for a specific symbol"""
+        logger.info(f"Starting backtest for {symbol} from {start_date} to {end_date}")
+        
+        try:
+            # Use current data if available
+            if symbol in self.state.market_data and '1h' in self.state.market_data[symbol]:
+                df = self.state.market_data[symbol]['1h'].copy()
+                df = DataFrameHandler.ensure_unique_index(df)
+                logger.info(f"Using current market data for backtest ({len(df)} candles)")
+            else:
+                # Generate synthetic data for demonstration
+                df = self.generate_synthetic_data(symbol, start_date, end_date)
+            
+            if df.empty or len(df) < 30:
+                logger.warning(f"Insufficient data for backtest on {symbol}")
+                return None, None
+            
+            # Execute trading simulation
+            balance = INITIAL_BANKROLL
+            trades = []
+            position = None
+            max_balance = balance
+            max_drawdown = 0
+            
+            # Ensure necessary columns
+            required_cols = ['open', 'high', 'low', 'close', 'volume']
+            for col in required_cols:
+                if col not in df.columns:
+                    df[col] = df['close'] if col in ['open', 'high', 'low'] else 1000000
+            
+            # Ensure technical indicators
+            if 'rsi' not in df.columns:
+                df = self.bot.add_technical_indicators(df)
+            
+            # Simulate trading
+            for i in range(30, len(df)):
+                try:
+                    current_time = df.index[i]
+                    current_price = df['close'].iloc[i]
+                    
+                    if pd.isna(current_price) or current_price <= 0:
+                        continue
+                    
+                    # Check exit if in position
+                    if position:
+                        exit_signal = False
+                        exit_reason = ""
+                        
+                        # Stop loss
+                        if current_price <= position["stop_loss"]:
+                            exit_signal = True
+                            exit_reason = "stop_loss"
+                        # Take profit
+                        elif current_price >= position["take_profit"]:
+                            exit_signal = True
+                            exit_reason = "take_profit"
+                        # RSI overbought
+                        elif 'rsi' in df.columns and df['rsi'].iloc[i] > RSI_OVERBOUGHT:
+                            exit_signal = True
+                            exit_reason = "rsi_overbought"
+                        
+                        if exit_signal:
+                            profit_amount = position["quantity"] * (current_price - position["entry_price"])
+                            profit_pct = (current_price / position["entry_price"] - 1) * 100
+                            balance += profit_amount
+                            
+                            trades.append({
+                                "entry_time": position["entry_time"],
+                                "exit_time": current_time,
+                                "entry_price": position["entry_price"],
+                                "exit_price": current_price,
+                                "quantity": position["quantity"],
+                                "profit_amount": profit_amount,
+                                "profit_pct": profit_pct,
+                                "exit_reason": exit_reason
+                            })
+                            
+                            position = None
+                            
+                            # Update drawdown
+                            if balance > max_balance:
+                                max_balance = balance
+                            drawdown = (max_balance - balance) / max_balance if max_balance > 0 else 0
+                            max_drawdown = max(max_drawdown, drawdown)
+                    
+                    # Check entry if not in position
+                    else:
+                        # Calculate buy score simplified
+                        buy_score = 3
+                        
+                        # RSI oversold
+                        if 'rsi' in df.columns and not pd.isna(df['rsi'].iloc[i]) and df['rsi'].iloc[i] < RSI_OVERSOLD:
+                            buy_score += 2
+                        
+                        # MACD bullish crossover
+                        if i > 0 and all(col in df.columns for col in ['macd', 'macd_signal']):
+                            if (df['macd'].iloc[i-1] < df['macd_signal'].iloc[i-1] and 
+                                df['macd'].iloc[i] > df['macd_signal'].iloc[i]):
+                                buy_score += 2
+                        
+                        # EMA crossover
+                        if i > 0 and all(col in df.columns for col in ['ema_fast', 'ema_slow']):
+                            if (df['ema_fast'].iloc[i-1] < df['ema_slow'].iloc[i-1] and 
+                                df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i]):
+                                buy_score += 2
+                        
+                        # High volume
+                        if 'rel_volume' in df.columns and not pd.isna(df['rel_volume'].iloc[i]):
+                            if df['rel_volume'].iloc[i] > VOLUME_THRESHOLD:
+                                buy_score += 1
+                        
+                        # Enter if score high
+                        if buy_score >= self.state.buy_score_threshold:
+                            risk_amount = balance * MAX_RISK_PER_TRADE
+                            atr_value = df['atr'].iloc[i] if 'atr' in df.columns else current_price * 0.01
+                            stop_loss = current_price - atr_value * STOP_LOSS_FACTOR
+                            risk_per_share = current_price - stop_loss
+                            
+                            if risk_per_share > 0:
+                                quantity = risk_amount / risk_per_share
+                                cost = quantity * current_price
+                                
+                                if cost <= balance * 0.95:
+                                    take_profit = current_price + (current_price - stop_loss) * 2
+                                    
+                                    position = {
+                                        "entry_time": current_time,
+                                        "entry_price": current_price,
+                                        "quantity": quantity,
+                                        "stop_loss": stop_loss,
+                                        "take_profit": take_profit
+                                    }
+                                    
+                                    balance -= cost
+                
+                except Exception as e:
+                    logger.error(f"Error in backtest iteration: {e}")
+                    continue
+            
+            # Close final position if any
+            if position:
+                final_price = df['close'].iloc[-1]
+                profit_amount = position["quantity"] * (final_price - position["entry_price"])
+                profit_pct = (final_price / position["entry_price"] - 1) * 100
+                balance += profit_amount
+                
+                trades.append({
+                    "entry_time": position["entry_time"],
+                    "exit_time": df.index[-1],
+                    "entry_price": position["entry_price"],
+                    "exit_price": final_price,
+                    "quantity": position["quantity"],
+                    "profit_amount": profit_amount,
+                    "profit_pct": profit_pct,
+                    "exit_reason": "end_of_backtest"
+                })
+            
+            # Calculate metrics
+            total_profit = balance - INITIAL_BANKROLL
+            win_rate = sum(1 for t in trades if t["profit_amount"] > 0) / len(trades) if trades else 0
+            avg_profit = sum(t["profit_pct"] for t in trades) / len(trades) if trades else 0
+            
+            logger.info(f"Backtest results for {symbol}: Profit={total_profit:.2f} USDT, Trades={len(trades)}, Win Rate={win_rate:.2%}")
+            
+            return trades, {
+                "total_profit": total_profit,
+                "win_rate": win_rate,
+                "avg_profit": avg_profit,
+                "max_drawdown": max_drawdown,
+                "trades": len(trades)
+            }
+        
+        except Exception as e:
+            logger.error(f"Error in backtest for {symbol}: {e}")
+            return None, None
+    
+    def generate_synthetic_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Generates synthetic data for backtesting"""
+        try:
+            start_time = datetime.strptime(start_date, "%Y-%m-%d")
+            end_time = datetime.strptime(end_date, "%Y-%m-%d")
+            
+            date_range = pd.date_range(start=start_time, end=end_time, freq='1H')
+            
+            # Base parameters
+            reference_price = 100.0
+            reference_volatility = 0.01
+            
+            # Generate synthetic prices
+            np.random.seed(42)
+            returns = np.random.normal(0.0001, reference_volatility, len(date_range))
+            prices = reference_price * (1 + np.cumsum(returns))
+            
+            # Create DataFrame
+            df = pd.DataFrame(index=date_range)
+            df['close'] = prices
+            df['open'] = df['close'] * (1 + np.random.normal(0, 0.001, len(df)))
+            df['high'] = np.maximum(df['open'], df['close']) * (1 + np.abs(np.random.normal(0, 0.002, len(df))))
+            df['low'] = np.minimum(df['open'], df['close']) * (1 - np.abs(np.random.normal(0, 0.002, len(df))))
+            df['volume'] = np.random.lognormal(10, 1, len(df))
+            
+            # Add indicators
+            df = self.bot.add_technical_indicators(df)
+            
+            logger.info(f"Generated {len(df)} synthetic data points for {symbol}")
+            return df
+        
+        except Exception as e:
+            logger.error(f"Error generating synthetic data: {e}")
+            return pd.DataFrame()
+
+# Main function
+def main():
+    """Main function to start the trading bot"""
+    try:
+        logger.info("="*60)
+        logger.info("🚀 STARTING CRYPTOCURRENCY TRADING BOT")
+        logger.info("="*60)
+        logger.info(f"Version: Complete Fixed for Python 3.13.3")
+        logger.info(f"Testnet Mode: {'ON' if IS_TESTNET else 'OFF'}")
+        logger.info(f"Initial Bankroll: {INITIAL_BANKROLL} USDT")
+        logger.info(f"Max Concurrent Trades: {MAX_CONCURRENT_TRADES}")
+        logger.info(f"Trading Symbols: {len(SYMBOLS)} pairs")
+        logger.info(f"AI Features: {'ENABLED' if ENABLE_AI else 'DISABLED'}")
+        logger.info("="*60)
+        
+        # Create trading bot instance
+        bot = TradingBot(API_KEY, API_SECRET, BASE_URL)
+        
+        # Add AI Advisor if configured
+        if ENABLE_AI:
+            bot.ai_advisor = AIAdvisor(OPENAI_API_KEY, GOOGLE_AI_API_KEY, bot.state)
+            logger.info("🤖 AI Advisor initialized")
+        
+        # Add Backtester
+        bot.backtester = Backtester(bot)
+        logger.info("📊 Backtester initialized")
+        
+        # Start the bot
+        logger.info("🎯 Starting trading operations...")
+        bot.start()
+
+    except KeyboardInterrupt:
+        logger.info("⏹️  Keyboard interrupt received, shutting down...")
+    except Exception as e:
+        logger.error(f"❌ Error in main function: {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        logger.info("🏁 Trading bot shutdown complete")
+
+if __name__ == "__main__":
+    main()
