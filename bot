@@ -1232,7 +1232,7 @@ def test_websocket_connection():
             logger.warning("  No price data received yet")
         
     except Exception as e:
-        logger.error(f"❌ Test failed: {e}")
+        logger.error(f" Test failed: {e}")
     finally:
         ws_manager.stop_websockets()
 
